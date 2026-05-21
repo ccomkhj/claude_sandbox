@@ -34,8 +34,10 @@ def test_save_overwrites(sandbox_home):
     assert session.load(meta.id).status == "running"
 
 
-def test_find_by_prefix(sandbox_home):
+def test_find_by_prefix(sandbox_home, monkeypatch):
+    monkeypatch.setattr(session, "_new_id", lambda: "AAAAAA" + "0" * 20)
     a = session.new_session(goal="a", repo="/tmp/r")
+    monkeypatch.setattr(session, "_new_id", lambda: "BBBBBB" + "0" * 20)
     b = session.new_session(goal="b", repo="/tmp/r")
     found = session.find(a.id[:6])
     assert found.id == a.id
