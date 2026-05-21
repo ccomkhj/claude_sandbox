@@ -67,14 +67,18 @@ def save(meta: Meta) -> None:
 
 def load(sid: str) -> Meta:
     path = session_dir(sid) / "meta.json"
-    return Meta(**json.loads(path.read_text()))
+    try:
+        raw = path.read_text()
+    except FileNotFoundError as e:
+        raise LookupError(f"no session {sid!r}") from e
+    return Meta(**json.loads(raw))
 
 
 def find(prefix: str) -> Meta:
     base = sandbox_home() / "sessions"
     if not base.exists():
         raise LookupError(f"no sessions yet (looked in {base})")
-    matches = sorted(p.name for p in base.iterdir() if p.name.startswith(prefix))
+    matches = sorted(p.name for p in base.iterdir() if p.is_dir() and p.name.startswith(prefix))
     if not matches:
         raise LookupError(f"no session matching {prefix!r}")
     if len(matches) > 1:

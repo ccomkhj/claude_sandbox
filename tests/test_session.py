@@ -56,3 +56,9 @@ def test_find_ambiguous_prefix_raises(sandbox_home, monkeypatch):
 def test_find_no_match_raises(sandbox_home):
     with pytest.raises(LookupError, match="no session"):
         session.find("ZZZZ")
+
+
+def test_find_no_match_with_other_sessions(sandbox_home):
+    session.new_session(goal="g", repo="/tmp/r")  # ensures sessions/ exists
+    with pytest.raises(LookupError, match="no session"):
+        session.find("ZZZZ")
