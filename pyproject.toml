@@ -1,0 +1,33 @@
+[project]
+name = "claude-code-sandbox"
+version = "0.1.0"
+description = "Run Claude Code in an isolated Docker sandbox against a production Postgres dump."
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.34",
+    "jinja2>=3.1",
+    "python-ulid>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "moto[s3]>=5",
+]
+
+[project.scripts]
+sandbox = "sandbox.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sandbox"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires Docker daemon; opt in with --run-integration",
+]
+addopts = "-ra"
