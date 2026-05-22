@@ -26,20 +26,26 @@ def test_fetch_downloads_first_time(s3_bucket, sandbox_home):
 
 def test_fetch_skips_when_cached(s3_bucket, sandbox_home, monkeypatch):
     dump.fetch("dumps", "prod/latest.dump")
-    calls = []
-    orig = s3_bucket.download_file
+    download_calls = []
+    head_calls = []
+    orig_download = s3_bucket.download_file
+    orig_head = s3_bucket.head_object
 
-    def spy(Bucket, Key, Filename):
-        calls.append((Bucket, Key))
-        return orig(Bucket=Bucket, Key=Key, Filename=Filename)
+    def download_spy(Bucket, Key, Filename):
+        download_calls.append((Bucket, Key))
+        return orig_download(Bucket=Bucket, Key=Key, Filename=Filename)
 
-    # Patch the boto3 client used by `dump.fetch`
+    def head_spy(Bucket, Key):
+        head_calls.append((Bucket, Key))
+        return orig_head(Bucket=Bucket, Key=Key)
+
     monkeypatch.setattr(dump, "_client", lambda: type("C", (), {
-        "head_object": s3_bucket.head_object,
-        "download_file": spy,
+        "head_object": staticmethod(head_spy),
+        "download_file": staticmethod(download_spy),
     })())
     dump.fetch("dumps", "prod/latest.dump")
-    assert calls == []  # not re-downloaded
+    assert download_calls == []          # cache hit — no re-download
+    assert head_calls == [("dumps", "prod/latest.dump")]  # but ETag is still checked
 
 
 def test_fetch_redownloads_when_etag_changes(s3_bucket, sandbox_home):
@@ -48,3 +54,22 @@ def test_fetch_redownloads_when_etag_changes(s3_bucket, sandbox_home):
     local2, etag2 = dump.fetch("dumps", "prod/latest.dump")
     assert etag1 != etag2
     assert local2.read_bytes() == b"DUMPDATA-v2"
+
+
+def test_fetch_separates_cache_by_bucket(s3_bucket, sandbox_home):
+    # Create a second bucket with identical content (same ETag)
+    s3_bucket.create_bucket(Bucket="dumps-staging")
+    s3_bucket.put_object(Bucket="dumps-staging", Key="prod/latest.dump", Body=b"DUMPDATA-v1")
+
+    p1, e1 = dump.fetch("dumps", "prod/latest.dump")
+    p2, e2 = dump.fetch("dumps-staging", "prod/latest.dump")
+
+    # Same content, so same ETag — but different cache files because bucket is in the key
+    assert e1 == e2
+    assert p1 != p2
+
+
+def test_fetch_raises_on_missing_key(s3_bucket, sandbox_home):
+    import botocore.exceptions
+    with pytest.raises(botocore.exceptions.ClientError):
+        dump.fetch("dumps", "does/not/exist.dump")
