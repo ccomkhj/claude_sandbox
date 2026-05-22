@@ -163,6 +163,11 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def _is_running(project: str, compose_file: Path) -> bool:
+    """Return True if the agent service is still running.
+
+    Only the agent service matters for finish/stop decisions — the db service
+    stays up indefinitely and must not prevent cmd_finish from proceeding.
+    """
     try:
         ps = docker.compose_ps(project=project, compose_file=compose_file)
     except Exception:
@@ -173,7 +178,7 @@ def _is_running(project: str, compose_file: Path) -> bool:
         return False
     if isinstance(rows, dict):
         rows = [rows]
-    return any(r.get("State") == "running" for r in rows)
+    return any(r.get("Service") == "agent" and r.get("State") == "running" for r in rows)
 
 
 def cmd_finish(args: argparse.Namespace) -> int:
