@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 
 def _run(argv: list[str], *, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
@@ -19,7 +18,7 @@ def compose_up(*, project: str, compose_file: Path, build: bool = True, detach: 
         argv.append("-d")
     if build:
         argv.append("--build")
-    return _run(argv)
+    return _run(argv, capture=False)
 
 
 def compose_down(*, project: str, compose_file: Path, volumes: bool = True, rmi_local: bool = True) -> subprocess.CompletedProcess:
@@ -28,7 +27,7 @@ def compose_down(*, project: str, compose_file: Path, volumes: bool = True, rmi_
         argv.append("-v")
     if rmi_local:
         argv += ["--rmi", "local"]
-    return _run(argv)
+    return _run(argv, capture=False)
 
 
 def compose_ps(*, project: str, compose_file: Path) -> subprocess.CompletedProcess:
@@ -44,12 +43,16 @@ def compose_logs_follow(*, project: str, compose_file: Path, stdout_path: Path) 
     argv = _compose_base(project, compose_file) + ["logs", "-f", "--no-color"]
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(stdout_path, "ab", buffering=0)
-    return subprocess.Popen(
-        argv,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        log_file.close()  # Popen dup'd the fd into the child; parent doesn't need it
+    return proc
 
 
 def cp(*, src: str, dst: Path) -> subprocess.CompletedProcess:
