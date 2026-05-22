@@ -1,0 +1,31 @@
+name: {{ session_id }}
+
+services:
+  db:
+    image: {{ db_image }}
+    networks: [db_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d {{ db_name }}"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+  agent:
+    image: {{ agent_image_name }}:{{ session_id }}
+    build:
+      context: {{ build_dir_agent }}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOAL: {{ goal | tojson }}
+      BRANCH: sandbox/{{ session_id }}
+      DATABASE_URL: postgres://postgres@db:5432/{{ db_name }}
+    networks: [agent_net, db_net]
+
+networks:
+  agent_net:
+    driver: bridge
+  db_net:
+    driver: bridge
+    internal: true
