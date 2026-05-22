@@ -236,8 +236,10 @@ def test_finish_imports_branch_into_bare(sandbox_home, tmp_path, monkeypatch, ca
     ).stdout
     assert "agent change" in log
 
-    assert (sdir / "patch.diff").is_file()
-    assert (sdir / "patch.diff").read_text().strip()
+    patch = (sdir / "patch.diff").read_text()
+    assert "agent change" in patch       # the agent's commit is in the patch
+    assert "init" not in patch           # base 'init' commit is NOT in the patch
+    assert "diff --git" in patch         # well-formed patch
 
     fake_down.assert_called_once()
     assert session.load(m.id).status == "finished"

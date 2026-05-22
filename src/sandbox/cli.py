@@ -198,7 +198,13 @@ def cmd_finish(args: argparse.Namespace) -> int:
         print(f"failed to copy branch bundle: {e}", file=sys.stderr)
         return 1
 
-    # Fetch into bare and write a single-file patch for convenience
+    # Fetch the base branch first so format_patch has a base ref. The bundle
+    # carries both refs when the agent's BASE_BRANCH existed (Task 8 contract);
+    # if it doesn't, format_patch falls back to --root, which is acceptable.
+    try:
+        repo.fetch_bundle_into_bare(bundle=bundle_dst, bare=sdir / "bare.git", branch="main")
+    except Exception:
+        pass  # base ref absent; format_patch will use --root
     repo.fetch_bundle_into_bare(bundle=bundle_dst, bare=sdir / "bare.git", branch=meta.branch)
     (sdir / "patch.diff").write_text(repo.format_patch(bare=sdir / "bare.git", branch=meta.branch))
 
