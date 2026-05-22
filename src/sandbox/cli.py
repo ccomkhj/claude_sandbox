@@ -120,10 +120,53 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
     return 0
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    meta = session.find(args.session)
+    sdir = session.session_dir(meta.id)
+    try:
+        ps = docker.compose_ps(project=meta.id.lower(), compose_file=sdir / "compose.yml")
+        compose_state = ps.stdout
+    except Exception as e:
+        compose_state = f"<compose ps failed: {e}>"
+    print(f"id:      {meta.id}")
+    print(f"status:  {meta.status}")
+    print(f"goal:    {meta.goal}")
+    print(f"repo:    {meta.repo}")
+    print(f"branch:  {meta.branch}")
+    print(f"started: {meta.started_at}")
+    print(f"compose: {compose_state.strip()}")
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    meta = session.find(args.session)
+    log_path = session.session_dir(meta.id) / "logs" / "agent.log"
+    if not log_path.is_file():
+        print(f"no logs at {log_path}", file=sys.stderr)
+        return 1
+    if not args.follow:
+        sys.stdout.write(log_path.read_text())
+        return 0
+    # Follow: simple tail -f
+    import time as _time
+    with log_path.open() as fh:
+        fh.seek(0, 2)  # end
+        while True:
+            line = fh.readline()
+            if not line:
+                _time.sleep(0.5)
+                continue
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.verb == "start":
         return cmd_start(args)
-    # other verbs added in later tasks
+    if args.verb == "status":
+        return cmd_status(args)
+    if args.verb == "logs":
+        return cmd_logs(args)
     print(f"verb {args.verb!r} not implemented yet", file=sys.stderr)
     return 1

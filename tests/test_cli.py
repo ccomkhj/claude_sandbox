@@ -159,3 +159,32 @@ def test_start_passes_lowercased_project_to_docker(
 def test_start_requires_dump_bucket_and_key(monkeypatch):
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["start", "--repo", "/tmp/r", "--goal", "g"])
+
+
+def test_status_prints_metadata(sandbox_home, monkeypatch, capsys):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    m.follower_pid = 1
+    session.save(m)
+
+    monkeypatch.setattr(cli.docker, "compose_ps", lambda **kw: MagicMock(stdout='[{"Service":"agent","State":"running"}]'))
+
+    rc = cli.main(["status", m.id[:12]])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert m.id in out
+    assert "running" in out
+    assert "g" in out  # goal echoed
+
+
+def test_logs_streams_existing_file(sandbox_home, monkeypatch, capsys):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    log_path = session.session_dir(m.id) / "logs" / "agent.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("line1\nline2\n")
+
+    rc = cli.main(["logs", m.id])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "line1" in out
+    assert "line2" in out
