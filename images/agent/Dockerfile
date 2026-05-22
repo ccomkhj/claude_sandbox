@@ -10,11 +10,7 @@ RUN apt-get update \
 
 RUN npm install -g @anthropic-ai/claude-code
 
-# Per-session build context contains:
-#   repo.bundle       — git bundle of the user's repo
-#   .credentials.json — Claude Code credentials (mode 0600)
-COPY repo.bundle /input/repo.bundle
-COPY .credentials.json /input/.credentials.json
+RUN mkdir -p /input
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

@@ -68,6 +68,15 @@ def test_docker_build_argv(monkeypatch):
     assert captured == [["docker", "build", "-t", "sandbox-db:etag123", "/x/build/db"]]
 
 
+def test_remove_images_argv(monkeypatch):
+    captured = []
+    monkeypatch.setattr(docker, "_run", make_fake_run(captured))
+    docker.remove_images("sandbox-agent:abc", "sandbox-db:def")
+    assert captured == [[
+        "docker", "image", "rm", "-f", "sandbox-agent:abc", "sandbox-db:def",
+    ]]
+
+
 def test_container_name():
     assert docker.container_name(project="abc", service="agent") == "abc-agent-1"
     assert docker.container_name(project="abc", service="db", index=2) == "abc-db-2"

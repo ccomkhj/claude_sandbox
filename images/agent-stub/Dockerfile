@@ -9,8 +9,7 @@ RUN apt-get update \
         coreutils \
  && rm -rf /var/lib/apt/lists/*
 
-COPY repo.bundle /input/repo.bundle
-COPY .credentials.json /input/.credentials.json
+RUN mkdir -p /input
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

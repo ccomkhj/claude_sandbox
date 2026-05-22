@@ -55,12 +55,18 @@ def compose_logs_follow(*, project: str, compose_file: Path, stdout_path: Path) 
     return proc
 
 
-def cp(*, src: str, dst: Path) -> subprocess.CompletedProcess:
+def cp(*, src: str, dst: Path | str) -> subprocess.CompletedProcess:
     return _run(["docker", "cp", src, str(dst)])
 
 
 def build(*, context: Path, tag: str) -> subprocess.CompletedProcess:
     return _run(["docker", "build", "-t", tag, str(context)])
+
+
+def remove_images(*images: str) -> subprocess.CompletedProcess:
+    if not images:
+        return subprocess.CompletedProcess([], 0, "", "")
+    return _run(["docker", "image", "rm", "-f", *images], check=False)
 
 
 def container_name(*, project: str, service: str, index: int = 1) -> str:

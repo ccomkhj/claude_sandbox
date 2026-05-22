@@ -42,6 +42,9 @@ class Meta:
     follower_pid: Optional[int] = None
     finished_at: Optional[float] = None
     exit_code: Optional[int] = None
+    base_branch: Optional[str] = None
+    agent_image: Optional[str] = None
+    db_image: Optional[str] = None
 
 
 def new_session(goal: str, repo: str) -> Meta:

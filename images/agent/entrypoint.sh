@@ -4,6 +4,15 @@ set -euo pipefail
 : "${GOAL:?GOAL env var required}"
 : "${BRANCH:?BRANCH env var required}"
 
+deadline=$((SECONDS + 120))
+while [[ ! -s /input/repo.bundle || ! -s /input/.credentials.json ]]; do
+  if (( SECONDS >= deadline )); then
+    echo "timed out waiting for sandbox inputs" >&2
+    exit 2
+  fi
+  sleep 1
+done
+
 # Install creds into the location claude expects, then shred original.
 mkdir -p /root/.claude
 cp /input/.credentials.json /root/.claude/.credentials.json

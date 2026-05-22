@@ -10,6 +10,52 @@ from pathlib import Path
 from sandbox import compose, docker, dump, repo, session
 
 
+def _agent_image_tag(base: str, sid: str) -> str:
+    return f"{base}:{sid}"
+
+
+def _db_image_tag(sid: str) -> str:
+    return f"sandbox-db:{sid.lower()}"
+
+
+def _cleanup_sensitive_build_inputs(sdir: Path) -> None:
+    for rel in (
+        "build/agent/repo.bundle",
+        "build/agent/.credentials.json",
+        "build/db/dump.dump",
+        "input/repo.bundle",
+        "input/.credentials.json",
+    ):
+        try:
+            (sdir / rel).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _cleanup_session_images(meta: session.Meta) -> None:
+    images = [image for image in (meta.agent_image, meta.db_image) if image]
+    if images:
+        try:
+            docker.remove_images(*images)
+        except Exception:
+            pass
+
+
+def _cleanup_compose_project(meta: session.Meta) -> None:
+    compose_file = session.session_dir(meta.id) / "compose.yml"
+    if not compose_file.exists():
+        return
+    try:
+        docker.compose_down(
+            project=meta.id.lower(),
+            compose_file=compose_file,
+            volumes=True,
+            rmi_local=True,
+        )
+    except Exception:
+        pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sandbox")
     sub = p.add_subparsers(dest="verb", required=True)
@@ -54,6 +100,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     except Exception:
         # Mark the partial session failed so prune can reclaim it later.
         import time as _time
+        _cleanup_sensitive_build_inputs(session.session_dir(meta.id))
+        _cleanup_compose_project(meta)
+        _cleanup_session_images(meta)
         try:
             meta.status = "failed"
             meta.finished_at = _time.time()
@@ -66,46 +115,63 @@ def cmd_start(args: argparse.Namespace) -> int:
 def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path) -> int:
     sdir = session.session_dir(meta.id)
     project = meta.id.lower()
+    meta.agent_image = _agent_image_tag(args.agent_image, meta.id)
+    meta.db_image = _db_image_tag(meta.id)
+    session.save(meta)
 
-    # 1. Fetch dump (cached by ETag)
-    local_dump, etag = dump.fetch(args.dump_bucket, args.dump_key)
+    try:
+        # 1. Fetch dump (cached by ETag)
+        local_dump, _etag = dump.fetch(args.dump_bucket, args.dump_key)
 
-    # 2. Assemble db build context
-    db_build = sdir / "build" / "db"
-    db_build.mkdir(parents=True)
-    shutil.copy(_images_root() / "db" / "Dockerfile", db_build / "Dockerfile")
-    shutil.copy(_images_root() / "db" / "init.sh", db_build / "init.sh")
-    shutil.copy(local_dump, db_build / "dump.dump")
-    db_image = f"sandbox-db:{etag}"
-    docker.build(context=db_build, tag=db_image)
+        # 2. Assemble db build context
+        db_build = sdir / "build" / "db"
+        db_build.mkdir(parents=True)
+        shutil.copy(_images_root() / "db" / "Dockerfile", db_build / "Dockerfile")
+        shutil.copy(_images_root() / "db" / "init.sh", db_build / "init.sh")
+        shutil.copy(local_dump, db_build / "dump.dump")
+        docker.build(context=db_build, tag=meta.db_image)
 
-    # 3. Assemble agent build context
-    agent_build = sdir / "build" / "agent"
-    agent_build.mkdir(parents=True)
-    shutil.copy(_images_root() / "agent" / "Dockerfile", agent_build / "Dockerfile")
-    shutil.copy(_images_root() / "agent" / "entrypoint.sh", agent_build / "entrypoint.sh")
+        # 3. Assemble agent build context
+        agent_build = sdir / "build" / "agent"
+        agent_build.mkdir(parents=True)
+        shutil.copy(_images_root() / "agent" / "Dockerfile", agent_build / "Dockerfile")
+        shutil.copy(_images_root() / "agent" / "entrypoint.sh", agent_build / "entrypoint.sh")
 
-    repo.bundle_host_repo(Path(args.repo), agent_build / "repo.bundle")
-    shutil.copy(creds_src, agent_build / ".credentials.json")
-    (agent_build / ".credentials.json").chmod(0o600)
+        input_dir = sdir / "input"
+        input_dir.mkdir(parents=True)
+        repo.bundle_host_repo(Path(args.repo), input_dir / "repo.bundle")
+        shutil.copy(creds_src, input_dir / ".credentials.json")
+        (input_dir / ".credentials.json").chmod(0o600)
 
-    # 4. Bare repo for the user to fetch from
-    repo.init_bare_repo(sdir / "bare.git")
+        # 4. Bare repo for the user to fetch from
+        repo.init_bare_repo(sdir / "bare.git")
 
-    # 5. Render and write compose.yml
-    cfg = compose.ComposeConfig(
-        session_id=meta.id,
-        goal=args.goal,
-        db_image=db_image,
-        agent_image_name=args.agent_image,
-        build_dir_db="./build/db",
-        build_dir_agent="./build/agent",
-        db_name=args.db_name,
-    )
-    (sdir / "compose.yml").write_text(compose.render(cfg))
+        # 5. Render and write compose.yml
+        cfg = compose.ComposeConfig(
+            session_id=meta.id,
+            goal=args.goal,
+            db_image=meta.db_image,
+            agent_image_name=args.agent_image,
+            build_dir_db="./build/db",
+            build_dir_agent="./build/agent",
+            db_name=args.db_name,
+        )
+        (sdir / "compose.yml").write_text(compose.render(cfg))
 
-    # 6. Up (compose template lowercases the project name)
-    docker.compose_up(project=project, compose_file=sdir / "compose.yml", build=True, detach=True)
+        # 6. Up (compose template lowercases the project name)
+        docker.compose_up(project=project, compose_file=sdir / "compose.yml", build=True, detach=True)
+
+        container = docker.container_name(project=project, service="agent")
+        docker.cp(
+            src=str(input_dir / "repo.bundle"),
+            dst=f"{container}:/input/repo.bundle",
+        )
+        docker.cp(
+            src=str(input_dir / ".credentials.json"),
+            dst=f"{container}:/input/.credentials.json",
+        )
+    finally:
+        _cleanup_sensitive_build_inputs(sdir)
 
     # 7. Start log follower
     follower = docker.compose_logs_follow(
@@ -203,26 +269,63 @@ def cmd_finish(args: argparse.Namespace) -> int:
         print(f"failed to copy branch bundle: {e}", file=sys.stderr)
         return 1
 
+    exit_code = _copy_agent_exit_code(container=container, sdir=sdir)
+    base_branch = _copy_agent_base_branch(container=container, sdir=sdir) or "main"
+
     # Fetch the base branch first so format_patch has a base ref. The bundle
     # carries both refs when the agent's BASE_BRANCH existed (Task 8 contract);
     # if it doesn't, format_patch falls back to --root, which is acceptable.
     try:
-        repo.fetch_bundle_into_bare(bundle=bundle_dst, bare=sdir / "bare.git", branch="main")
+        repo.fetch_bundle_into_bare(bundle=bundle_dst, bare=sdir / "bare.git", branch=base_branch)
     except Exception:
         pass  # base ref absent; format_patch will use --root
     repo.fetch_bundle_into_bare(bundle=bundle_dst, bare=sdir / "bare.git", branch=meta.branch)
-    (sdir / "patch.diff").write_text(repo.format_patch(bare=sdir / "bare.git", branch=meta.branch))
+    (sdir / "patch.diff").write_text(
+        repo.format_patch(bare=sdir / "bare.git", branch=meta.branch, base=base_branch)
+    )
 
-    # Tear down compose project; this also removes per-session images so creds + db disappear
+    # Tear down compose resources, then explicitly remove custom-tagged images.
     docker.compose_down(project=project, compose_file=compose_file, volumes=True, rmi_local=True)
+    _cleanup_session_images(meta)
 
-    meta.status = "finished"
+    meta.status = "finished" if exit_code == 0 else "crashed"
+    meta.exit_code = exit_code
+    meta.base_branch = base_branch
     meta.finished_at = _time.time()
     session.save(meta)
 
     print(f"branch ready: git fetch {sdir / 'bare.git'} {meta.branch}")
     print(f"patch:        {sdir / 'patch.diff'}")
     return 0
+
+
+def _copy_agent_output_text(*, container: str, name: str, sdir: Path) -> str | None:
+    dst = sdir / name
+    try:
+        docker.cp(src=f"{container}:/output/{name}", dst=dst)
+    except Exception:
+        return None
+    try:
+        return dst.read_text().strip()
+    except Exception:
+        return None
+
+
+def _copy_agent_exit_code(*, container: str, sdir: Path) -> int:
+    raw = _copy_agent_output_text(container=container, name="exit_code", sdir=sdir)
+    try:
+        return int(raw or "0")
+    except ValueError:
+        return 0
+
+
+def _copy_agent_base_branch(*, container: str, sdir: Path) -> str | None:
+    raw = _copy_agent_output_text(container=container, name="base_branch", sdir=sdir)
+    if raw and any(ch.isspace() for ch in raw):
+        return None
+    if raw and len(raw) > 200:
+        return None
+    return raw or None
 
 
 def _wait_until_stopped(*, project: str, compose_file: Path, timeout_s: float = 30.0) -> bool:
@@ -250,6 +353,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
         except Exception:
             pass
     docker.compose_down(project=project, compose_file=compose_file, volumes=True, rmi_local=True)
+    _cleanup_session_images(meta)
     meta.status = "stopped"
     meta.finished_at = _time.time()
     session.save(meta)
