@@ -1,0 +1,84 @@
+import json
+import shutil
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from sandbox import cli, session
+
+
+def test_parser_recognizes_all_verbs():
+    p = cli.build_parser()
+    for verb in ("start", "status", "logs", "finish", "stop", "prune"):
+        ns = p.parse_args([verb] + (["--repo", "/tmp/r", "--goal", "g", "--dump-bucket", "b", "--dump-key", "k"] if verb == "start" else ["zzz"] if verb in ("status", "logs", "finish", "stop") else []))
+        assert ns.verb == verb
+
+
+def test_start_orchestrates_and_prints_session_id(sandbox_home, tmp_path, monkeypatch, capsys):
+    # Real on-disk source repo so `repo.bundle_host_repo` works.
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    creds = tmp_path / "creds_home" / ".claude"
+    creds.mkdir(parents=True)
+    (creds / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+
+    # Stub the side-effect modules
+    fake_dump = MagicMock(return_value=(tmp_path / "fake.dump", "etag123"))
+    (tmp_path / "fake.dump").write_bytes(b"x")
+    monkeypatch.setattr(cli.dump, "fetch", fake_dump)
+
+    fake_build = MagicMock()
+    fake_up = MagicMock()
+    fake_logs = MagicMock(return_value=MagicMock(pid=4242))
+    monkeypatch.setattr(cli.docker, "build", fake_build)
+    monkeypatch.setattr(cli.docker, "compose_up", fake_up)
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", fake_logs)
+
+    rc = cli.main([
+        "start",
+        "--repo", str(src),
+        "--goal", "refactor X",
+        "--dump-bucket", "dumps",
+        "--dump-key", "prod/latest.dump",
+        "--db-name", "appdb",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    sid = out.splitlines()[-1].strip()
+
+    meta = session.load(sid)
+    assert meta.goal == "refactor X"
+    assert meta.status == "running"
+    assert meta.follower_pid == 4242
+
+    sdir = session.session_dir(sid)
+    assert (sdir / "compose.yml").exists()
+    assert (sdir / "build" / "agent" / "repo.bundle").exists()
+    assert (sdir / "build" / "agent" / ".credentials.json").exists()
+    assert (sdir / "build" / "db" / "dump.dump").exists()
+    assert (sdir / "bare.git" / "HEAD").exists()
+
+    fake_dump.assert_called_once_with("dumps", "prod/latest.dump")
+    fake_build.assert_called_once()
+    fake_up.assert_called_once()
+    fake_logs.assert_called_once()
+
+
+def test_start_aborts_when_creds_missing(sandbox_home, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty_home"))
+    rc = cli.main([
+        "start", "--repo", str(tmp_path), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+    ])
+    assert rc != 0
+    assert "credentials" in capsys.readouterr().err.lower()
