@@ -30,19 +30,20 @@ def fetch_bundle_into_bare(*, bundle: Path, bare: Path, branch: str) -> None:
     _git("fetch", str(bundle), f"{branch}:{branch}", cwd=bare)
 
 
-def format_patch(*, bare: Path, branch: str, base: str = "main") -> str:
-    # Check whether the base ref exists in the bare repo; if not, use --root
-    # so that all commits on the branch are included in the patch.
-    ref_check = subprocess.run(
-        ["git", "rev-parse", "--verify", base],
+def _ref_exists(bare: Path, ref: str) -> bool:
+    """Return True iff `ref` is a valid revision in the bare repo."""
+    res = subprocess.run(
+        ["git", "rev-parse", "--verify", ref],
         cwd=bare,
         capture_output=True,
         text=True,
     )
-    if ref_check.returncode == 0:
-        range_arg = f"{base}..{branch}"
-        return _git("format-patch", "--stdout", range_arg, cwd=bare, capture=True)
-    else:
+    return res.returncode == 0
+
+
+def format_patch(*, bare: Path, branch: str, base: str = "main") -> str:
+    if _ref_exists(bare, base):
         return _git(
-            "format-patch", "--stdout", "--root", branch, cwd=bare, capture=True
+            "format-patch", "--stdout", f"{base}..{branch}", cwd=bare, capture=True
         )
+    return _git("format-patch", "--stdout", "--root", branch, cwd=bare, capture=True)

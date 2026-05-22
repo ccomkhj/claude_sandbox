@@ -82,3 +82,35 @@ def test_format_patch_returns_non_empty(src_repo, tmp_path):
     patch = repo.format_patch(bare=bare, branch="feature", base="main")
     assert "more.txt" in patch
     assert "diff --git" in patch
+
+
+def test_format_patch_with_known_base_excludes_pre_base_commits(src_repo, tmp_path):
+    # Add a commit on main that should NOT appear in the patch.
+    (src_repo / "on_main.txt").write_text("on main\n")
+    git(src_repo, "add", ".")
+    git(src_repo, "commit", "-m", "main change")
+
+    git(src_repo, "checkout", "-b", "feature")
+    (src_repo / "on_feature.txt").write_text("on feature\n")
+    git(src_repo, "add", ".")
+    git(src_repo, "commit", "-m", "feature change")
+
+    # Bundle BOTH refs so the bare repo has main and feature.
+    all_bundle = tmp_path / "all.bundle"
+    subprocess.run(
+        ["git", "-C", str(src_repo), "bundle", "create", str(all_bundle), "--all"],
+        check=True,
+    )
+
+    bare = tmp_path / "bare.git"
+    repo.init_bare_repo(bare)
+    # Fetch both refs from the same bundle
+    subprocess.run(
+        ["git", "-C", str(bare), "fetch", str(all_bundle), "main:main", "feature:feature"],
+        check=True,
+    )
+
+    patch = repo.format_patch(bare=bare, branch="feature", base="main")
+    assert "on_feature.txt" in patch
+    assert "on_main.txt" not in patch
+    assert "hello.txt" not in patch  # initial-commit file must not be in the patch
