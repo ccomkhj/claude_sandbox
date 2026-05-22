@@ -188,3 +188,71 @@ def test_logs_streams_existing_file(sandbox_home, monkeypatch, capsys):
     assert rc == 0
     assert "line1" in out
     assert "line2" in out
+
+
+def test_finish_imports_branch_into_bare(sandbox_home, tmp_path, monkeypatch, capsys):
+    import subprocess
+
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    session.save(m)
+    sdir = session.session_dir(m.id)
+
+    # Prepare bare repo on host
+    from sandbox import repo
+    repo.init_bare_repo(sdir / "bare.git")
+
+    # Build a fake "container output" bundle for the branch
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(["git", "-C", str(work), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
+    (work / "init").write_text("init")
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "init"], check=True)
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", m.branch], check=True)
+    (work / "x").write_text("x")
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "agent change"], check=True)
+    bundle_src = tmp_path / "branch.bundle"
+    subprocess.run(["git", "-C", str(work), "bundle", "create", str(bundle_src), "main", m.branch], check=True)
+
+    # docker cp + compose_down stubbed
+    def fake_cp(*, src, dst):
+        import shutil as _sh
+        _sh.copy(bundle_src, dst)
+    monkeypatch.setattr(cli.docker, "cp", fake_cp)
+    monkeypatch.setattr(cli.docker, "compose_ps", lambda **kw: MagicMock(stdout="[]"))  # nothing running
+    fake_down = MagicMock()
+    monkeypatch.setattr(cli.docker, "compose_down", fake_down)
+
+    rc = cli.main(["finish", m.id])
+    assert rc == 0
+
+    log = subprocess.run(
+        ["git", "-C", str(sdir / "bare.git"), "log", "--format=%s", m.branch],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "agent change" in log
+
+    assert (sdir / "patch.diff").is_file()
+    assert (sdir / "patch.diff").read_text().strip()
+
+    fake_down.assert_called_once()
+    assert session.load(m.id).status == "finished"
+
+
+def test_finish_refuses_when_session_is_running(sandbox_home, monkeypatch, capsys):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    session.save(m)
+
+    # compose ps returns a running service
+    monkeypatch.setattr(cli.docker, "compose_ps",
+                        lambda **kw: MagicMock(stdout='[{"Service":"agent","State":"running"}]'))
+
+    rc = cli.main(["finish", m.id])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "still running" in err

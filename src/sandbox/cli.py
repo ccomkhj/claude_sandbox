@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json as _json
 import shutil
 import sys
+import time as _time
 from pathlib import Path
 
 from sandbox import compose, docker, dump, repo, session
@@ -160,13 +162,68 @@ def cmd_logs(args: argparse.Namespace) -> int:
             sys.stdout.flush()
 
 
+def _is_running(project: str, compose_file: Path) -> bool:
+    try:
+        ps = docker.compose_ps(project=project, compose_file=compose_file)
+    except Exception:
+        return False
+    try:
+        rows = _json.loads(ps.stdout or "[]")
+    except Exception:
+        return False
+    if isinstance(rows, dict):
+        rows = [rows]
+    return any(r.get("State") == "running" for r in rows)
+
+
+def cmd_finish(args: argparse.Namespace) -> int:
+    meta = session.find(args.session)
+    sdir = session.session_dir(meta.id)
+    compose_file = sdir / "compose.yml"
+    project = meta.id.lower()
+
+    if _is_running(project, compose_file):
+        print(
+            f"session {meta.id} is still running. Use `sandbox stop {meta.id}` first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Pull branch bundle out of the agent container
+    bundle_dst = sdir / "branch.bundle"
+    container = docker.container_name(project=project, service="agent")
+    try:
+        docker.cp(src=f"{container}:/output/branch.bundle", dst=bundle_dst)
+    except Exception as e:
+        print(f"failed to copy branch bundle: {e}", file=sys.stderr)
+        return 1
+
+    # Fetch into bare and write a single-file patch for convenience
+    repo.fetch_bundle_into_bare(bundle=bundle_dst, bare=sdir / "bare.git", branch=meta.branch)
+    (sdir / "patch.diff").write_text(repo.format_patch(bare=sdir / "bare.git", branch=meta.branch))
+
+    # Tear down compose project; this also removes per-session images so creds + db disappear
+    docker.compose_down(project=project, compose_file=compose_file, volumes=True, rmi_local=True)
+
+    meta.status = "finished"
+    meta.finished_at = _time.time()
+    session.save(meta)
+
+    print(f"branch ready: git fetch {sdir / 'bare.git'} {meta.branch}")
+    print(f"patch:        {sdir / 'patch.diff'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.verb == "start":
-        return cmd_start(args)
-    if args.verb == "status":
-        return cmd_status(args)
-    if args.verb == "logs":
-        return cmd_logs(args)
-    print(f"verb {args.verb!r} not implemented yet", file=sys.stderr)
-    return 1
+    dispatch = {
+        "start": cmd_start,
+        "status": cmd_status,
+        "logs": cmd_logs,
+        "finish": cmd_finish,
+    }
+    handler = dispatch.get(args.verb)
+    if handler is None:
+        print(f"verb {args.verb!r} not implemented yet", file=sys.stderr)
+        return 1
+    return handler(args)
