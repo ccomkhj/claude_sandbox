@@ -82,3 +82,80 @@ def test_start_aborts_when_creds_missing(sandbox_home, tmp_path, monkeypatch, ca
     ])
     assert rc != 0
     assert "credentials" in capsys.readouterr().err.lower()
+
+
+def test_start_marks_session_failed_when_orchestration_raises(
+    sandbox_home, tmp_path, monkeypatch, capsys
+):
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    creds = tmp_path / "creds_home" / ".claude"
+    creds.mkdir(parents=True)
+    (creds / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+
+    # Force dump.fetch to blow up after session is created
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(side_effect=RuntimeError("s3 boom")))
+
+    with pytest.raises(RuntimeError, match="s3 boom"):
+        cli.main([
+            "start", "--repo", str(src), "--goal", "g",
+            "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+        ])
+
+    # Exactly one session should exist, and it should be marked failed.
+    sessions = session.all_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].status == "failed"
+    assert sessions[0].finished_at is not None
+
+
+def test_start_passes_lowercased_project_to_docker(
+    sandbox_home, tmp_path, monkeypatch, capsys
+):
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    creds = tmp_path / "creds_home" / ".claude"
+    creds.mkdir(parents=True)
+    (creds / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+
+    (tmp_path / "fake.dump").write_bytes(b"x")
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "e")))
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    fake_up = MagicMock()
+    fake_logs = MagicMock(return_value=MagicMock(pid=1))
+    monkeypatch.setattr(cli.docker, "compose_up", fake_up)
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", fake_logs)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+    ])
+    assert rc == 0
+    sid = capsys.readouterr().out.strip().splitlines()[-1]
+    project = fake_up.call_args.kwargs["project"]
+    assert project == sid.lower()
+    assert project == project.lower()  # idempotent — verifies it's already lowercased
+    assert fake_logs.call_args.kwargs["project"] == project
+
+
+def test_start_requires_dump_bucket_and_key(monkeypatch):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["start", "--repo", "/tmp/r", "--goal", "g"])

@@ -47,7 +47,23 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 2
 
     meta = session.new_session(goal=args.goal, repo=args.repo)
+    try:
+        return _start_session(meta, args, creds_src)
+    except Exception:
+        # Mark the partial session failed so prune can reclaim it later.
+        import time as _time
+        try:
+            meta.status = "failed"
+            meta.finished_at = _time.time()
+            session.save(meta)
+        except Exception:
+            pass
+        raise
+
+
+def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path) -> int:
     sdir = session.session_dir(meta.id)
+    project = meta.id.lower()
 
     # 1. Fetch dump (cached by ETag)
     local_dump, etag = dump.fetch(args.dump_bucket, args.dump_key)
@@ -86,13 +102,12 @@ def cmd_start(args: argparse.Namespace) -> int:
     )
     (sdir / "compose.yml").write_text(compose.render(cfg))
 
-    # 6. Up (the compose template lowercases project name; pass meta.id.lower() to docker -p
-    #    so the CLI's project arg matches the rendered name).
-    docker.compose_up(project=meta.id.lower(), compose_file=sdir / "compose.yml", build=True, detach=True)
+    # 6. Up (compose template lowercases the project name)
+    docker.compose_up(project=project, compose_file=sdir / "compose.yml", build=True, detach=True)
 
     # 7. Start log follower
     follower = docker.compose_logs_follow(
-        project=meta.id.lower(),
+        project=project,
         compose_file=sdir / "compose.yml",
         stdout_path=sdir / "logs" / "agent.log",
     )
