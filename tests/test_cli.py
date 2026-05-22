@@ -258,3 +258,38 @@ def test_finish_refuses_when_session_is_running(sandbox_home, monkeypatch, capsy
     assert rc != 0
     err = capsys.readouterr().err
     assert "still running" in err
+
+
+def test_stop_sends_sigterm_then_compose_down(sandbox_home, monkeypatch):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    session.save(m)
+
+    fake_kill = MagicMock()
+    fake_down = MagicMock()
+    monkeypatch.setattr(cli.docker, "compose_kill", fake_kill)
+    monkeypatch.setattr(cli.docker, "compose_down", fake_down)
+    monkeypatch.setattr(cli, "_wait_until_stopped", lambda **kw: True)  # short-circuit
+
+    rc = cli.main(["stop", m.id])
+    assert rc == 0
+    fake_kill.assert_called_once()
+    fake_down.assert_called_once()
+    assert session.load(m.id).status == "stopped"
+
+
+def test_prune_removes_old_finished_sessions(sandbox_home):
+    import time as _t
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "finished"
+    m.finished_at = _t.time() - 60 * 60 * 24 * 31  # 31 days ago
+    session.save(m)
+    fresh = session.new_session(goal="g2", repo="/tmp/r")
+    fresh.status = "finished"
+    fresh.finished_at = _t.time()
+    session.save(fresh)
+
+    rc = cli.main(["prune"])
+    assert rc == 0
+    assert not session.session_dir(m.id).exists()
+    assert session.session_dir(fresh.id).exists()

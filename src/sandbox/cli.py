@@ -220,6 +220,52 @@ def cmd_finish(args: argparse.Namespace) -> int:
     return 0
 
 
+def _wait_until_stopped(*, project: str, compose_file: Path, timeout_s: float = 30.0) -> bool:
+    start = _time.time()
+    while _time.time() - start < timeout_s:
+        if not _is_running(project, compose_file):
+            return True
+        _time.sleep(1.0)
+    return False
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    meta = session.find(args.session)
+    sdir = session.session_dir(meta.id)
+    compose_file = sdir / "compose.yml"
+    project = meta.id.lower()
+    try:
+        docker.compose_kill(project=project, compose_file=compose_file, signal="SIGTERM")
+    except Exception:
+        pass
+    if not _wait_until_stopped(project=project, compose_file=compose_file):
+        # force teardown if SIGTERM didn't take
+        try:
+            docker.compose_kill(project=project, compose_file=compose_file, signal="SIGKILL")
+        except Exception:
+            pass
+    docker.compose_down(project=project, compose_file=compose_file, volumes=True, rmi_local=True)
+    meta.status = "stopped"
+    meta.finished_at = _time.time()
+    session.save(meta)
+    print(f"stopped {meta.id}")
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    cutoff = _time.time() - 60 * 60 * 24 * 30  # 30 days
+    removed = []
+    for meta in session.all_sessions():
+        if meta.status in ("finished", "failed", "crashed", "stopped"):
+            if meta.finished_at is not None and meta.finished_at < cutoff:
+                shutil.rmtree(session.session_dir(meta.id))
+                removed.append(meta.id)
+    print(f"pruned {len(removed)} session(s)")
+    for sid in removed:
+        print(f"  {sid}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     dispatch = {
@@ -227,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "logs": cmd_logs,
         "finish": cmd_finish,
+        "stop": cmd_stop,
+        "prune": cmd_prune,
     }
     handler = dispatch.get(args.verb)
     if handler is None:
