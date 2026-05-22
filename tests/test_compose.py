@@ -1,3 +1,6 @@
+import dataclasses
+
+import pytest
 import yaml
 
 from sandbox.compose import ComposeConfig, render
@@ -13,15 +16,13 @@ def cfg(**overrides):
         build_dir_agent="./build/agent",
         db_name="appdb",
     )
-    for k, v in overrides.items():
-        setattr(base, k, v)
-    return base
+    return dataclasses.replace(base, **overrides)
 
 
 def test_render_parses_as_yaml():
     out = render(cfg())
     parsed = yaml.safe_load(out)
-    assert parsed["name"] == "01HK3P0000000000000000"
+    assert parsed["name"] == "01hk3p0000000000000000"  # lowercased
     assert "agent" in parsed["services"]
     assert "db" in parsed["services"]
 
@@ -61,3 +62,13 @@ def test_agent_depends_on_db_healthcheck():
 def test_goal_passed_through_env():
     parsed = yaml.safe_load(render(cfg(goal="please be careful")))
     assert parsed["services"]["agent"]["environment"]["GOAL"] == "please be careful"
+
+
+def test_missing_template_field_raises_strict_undefined():
+    import jinja2
+    # Render directly with an incomplete dict — simulates a future template
+    # field that isn't in ComposeConfig yet.
+    from sandbox.compose import _env
+    tpl = _env.from_string("hello {{ nonexistent_field }}")
+    with pytest.raises(jinja2.UndefinedError):
+        tpl.render()

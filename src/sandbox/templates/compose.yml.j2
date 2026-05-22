@@ -1,4 +1,4 @@
-name: {{ session_id }}
+name: {{ session_id | lower }}
 
 services:
   db:
@@ -20,7 +20,7 @@ services:
     environment:
       GOAL: {{ goal | tojson }}
       BRANCH: sandbox/{{ session_id }}
-      DATABASE_URL: postgres://postgres@db:5432/{{ db_name }}
+      DATABASE_URL: postgresql://postgres@db:5432/{{ db_name }}
     networks: [agent_net, db_net]
 
 networks:
