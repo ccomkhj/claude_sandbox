@@ -41,10 +41,13 @@ def test_start_orchestrates_and_prints_session_id(sandbox_home, tmp_path, monkey
     fake_up = MagicMock()
     fake_cp = MagicMock()
     fake_logs = MagicMock(return_value=MagicMock(pid=4242))
+    fake_exec = MagicMock(return_value=MagicMock(returncode=0))
     monkeypatch.setattr(cli.docker, "build", fake_build)
     monkeypatch.setattr(cli.docker, "compose_up", fake_up)
     monkeypatch.setattr(cli.docker, "cp", fake_cp)
     monkeypatch.setattr(cli.docker, "compose_logs_follow", fake_logs)
+    monkeypatch.setattr(cli.docker, "exec_in_container", fake_exec)
+    monkeypatch.setattr(cli, "_wait_for_db_ready", MagicMock())
 
     rc = cli.main([
         "start",
@@ -63,17 +66,15 @@ def test_start_orchestrates_and_prints_session_id(sandbox_home, tmp_path, monkey
     assert meta.status == "running"
     assert meta.follower_pid == 4242
     assert meta.agent_image == f"sandbox-agent:{sid}"
-    assert meta.db_image == f"sandbox-db:{sid.lower()}"
+    assert meta.db_image is None  # v0.2.0: no per-session db image
 
     sdir = session.session_dir(sid)
     assert (sdir / "compose.yml").exists()
     assert not (sdir / "build" / "agent" / "repo.bundle").exists()
     assert not (sdir / "build" / "agent" / ".credentials.json").exists()
-    assert not (sdir / "build" / "db" / "dump.dump").exists()
     assert (sdir / "bare.git" / "HEAD").exists()
 
     fake_dump.assert_called_once_with("dumps", "prod/latest.dump")
-    fake_build.assert_called_once()
     fake_up.assert_called_once()
     cp_sources = [call.kwargs["src"] for call in fake_cp.call_args_list]
     assert str(sdir / "input" / "repo.bundle") in cp_sources
@@ -148,6 +149,7 @@ def test_start_tears_down_compose_when_input_copy_fails(
     monkeypatch.setattr(cli.docker, "build", MagicMock())
     monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
     monkeypatch.setattr(cli.docker, "cp", MagicMock(side_effect=RuntimeError("cp boom")))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", MagicMock())
     compose_down = MagicMock()
     remove_images = MagicMock()
     monkeypatch.setattr(cli.docker, "compose_down", compose_down)
@@ -162,7 +164,8 @@ def test_start_tears_down_compose_when_input_copy_fails(
     m = session.all_sessions()[0]
     assert m.status == "failed"
     compose_down.assert_called_once()
-    remove_images.assert_called_once_with(m.agent_image, m.db_image)
+    # v0.2.0: db_image is None (upstream postgres:16), so only agent_image is cleaned up
+    remove_images.assert_called_once_with(m.agent_image)
     sdir = session.session_dir(m.id)
     assert not (sdir / "input" / "repo.bundle").exists()
     assert not (sdir / "input" / ".credentials.json").exists()
@@ -192,9 +195,12 @@ def test_start_passes_lowercased_project_to_docker(
     fake_up = MagicMock()
     fake_cp = MagicMock()
     fake_logs = MagicMock(return_value=MagicMock(pid=1))
+    fake_exec = MagicMock(return_value=MagicMock(returncode=0))
     monkeypatch.setattr(cli.docker, "compose_up", fake_up)
     monkeypatch.setattr(cli.docker, "cp", fake_cp)
     monkeypatch.setattr(cli.docker, "compose_logs_follow", fake_logs)
+    monkeypatch.setattr(cli.docker, "exec_in_container", fake_exec)
+    monkeypatch.setattr(cli, "_wait_for_db_ready", MagicMock())
 
     rc = cli.main([
         "start", "--repo", str(src), "--goal", "g",
@@ -491,6 +497,64 @@ def test_stop_sends_sigterm_then_compose_down(sandbox_home, monkeypatch):
     fake_kill.assert_called_once()
     fake_down.assert_called_once()
     assert session.load(m.id).status == "stopped"
+
+
+def test_start_imports_dump_at_runtime_not_via_image_build(
+    sandbox_home, tmp_path, monkeypatch, capsys
+):
+    """The dump must enter via docker cp + docker exec pg_restore, never via docker build."""
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    creds = tmp_path / "creds_home" / ".claude"
+    creds.mkdir(parents=True)
+    (creds / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
+
+    build_calls = []
+    exec_calls = []
+    cp_calls = []
+
+    monkeypatch.setattr(cli.docker, "build", lambda **kw: build_calls.append(kw) or MagicMock(returncode=0))
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container",
+                        lambda **kw: exec_calls.append(kw) or MagicMock(returncode=0))
+    monkeypatch.setattr(cli.docker, "cp", lambda **kw: cp_calls.append(kw) or MagicMock(returncode=0))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+    ])
+    assert rc == 0
+
+    # Critical invariant: no docker build for a sandbox-db:* image
+    sandbox_db_builds = [c for c in build_calls if str(c.get("tag", "")).startswith("sandbox-db")]
+    assert sandbox_db_builds == [], f"sandbox-db image was built: {sandbox_db_builds}"
+
+    # Dump was cp'd into the db container
+    dump_cps = [c for c in cp_calls if "dump.dump" in str(c.get("dst", ""))]
+    assert len(dump_cps) == 1, f"expected 1 dump cp, got {dump_cps}"
+    assert "-db-1" in str(dump_cps[0]["dst"])
+
+    # pg_restore was exec'd
+    exec_cmds = [c["cmd"][0] for c in exec_calls]
+    assert "pg_restore" in exec_cmds
+
+    # Dump cleanup step: either shred or rm
+    cleanup_present = any(c["cmd"][0] in ("shred", "rm") for c in exec_calls)
+    assert cleanup_present, f"dump cleanup step missing in {exec_cmds}"
 
 
 def test_prune_removes_old_finished_sessions(sandbox_home):

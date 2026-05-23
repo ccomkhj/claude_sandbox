@@ -15,14 +15,14 @@ def _agent_image_tag(base: str, sid: str) -> str:
 
 
 def _db_image_tag(sid: str) -> str:
-    return f"sandbox-db:{sid.lower()}"
+    # v0.2.0: db is upstream postgres:16, no per-session image
+    return "postgres:16"
 
 
 def _cleanup_sensitive_build_inputs(sdir: Path) -> None:
     for rel in (
         "build/agent/repo.bundle",
         "build/agent/.credentials.json",
-        "build/db/dump.dump",
         "input/repo.bundle",
         "input/.credentials.json",
     ):
@@ -39,6 +39,47 @@ def _cleanup_session_images(meta: session.Meta) -> None:
             docker.remove_images(*images)
         except Exception:
             pass
+
+
+def _wait_for_db_ready(*, container: str, db_name: str, timeout_s: float = 60.0) -> None:
+    deadline = _time.time() + timeout_s
+    last_err = None
+    while _time.time() < deadline:
+        try:
+            probe = docker.exec_in_container(
+                container=container,
+                cmd=["pg_isready", "-U", "postgres", "-d", db_name],
+            )
+            if probe.returncode == 0:
+                return
+        except Exception as e:
+            last_err = e
+        _time.sleep(1.0)
+    raise RuntimeError(f"db container {container} never became ready: {last_err}")
+
+
+def _import_dump_at_runtime(*, container: str, local_dump: Path, db_name: str) -> None:
+    """Copy the dump into the running db container, restore it, then delete it."""
+    docker.cp(src=str(local_dump), dst=f"{container}:/tmp/dump.dump")
+    restore = docker.exec_in_container(
+        container=container,
+        cmd=[
+            "pg_restore",
+            "--username", "postgres",
+            "--dbname", db_name,
+            "--no-owner", "--no-acl",
+            "--clean", "--if-exists",
+            "--exit-on-error",
+            "/tmp/dump.dump",
+        ],
+    )
+    if restore.returncode != 0:
+        raise RuntimeError(f"pg_restore failed: rc={restore.returncode}")
+    # Best-effort wipe; tolerate `shred` not being present in the image.
+    try:
+        docker.exec_in_container(container=container, cmd=["shred", "-u", "/tmp/dump.dump"])
+    except Exception:
+        docker.exec_in_container(container=container, cmd=["rm", "-f", "/tmp/dump.dump"])
 
 
 def _cleanup_compose_project(meta: session.Meta) -> None:
@@ -116,22 +157,14 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
     sdir = session.session_dir(meta.id)
     project = meta.id.lower()
     meta.agent_image = _agent_image_tag(args.agent_image, meta.id)
-    meta.db_image = _db_image_tag(meta.id)
+    meta.db_image = None  # v0.2.0: db uses shared upstream postgres:16, nothing per-session to remove
     session.save(meta)
 
     try:
         # 1. Fetch dump (cached by ETag)
         local_dump, _etag = dump.fetch(args.dump_bucket, args.dump_key)
 
-        # 2. Assemble db build context
-        db_build = sdir / "build" / "db"
-        db_build.mkdir(parents=True)
-        shutil.copy(_images_root() / "db" / "Dockerfile", db_build / "Dockerfile")
-        shutil.copy(_images_root() / "db" / "init.sh", db_build / "init.sh")
-        shutil.copy(local_dump, db_build / "dump.dump")
-        docker.build(context=db_build, tag=meta.db_image)
-
-        # 3. Assemble agent build context
+        # 2. Assemble agent build context (db is now upstream postgres:16; no build)
         agent_build = sdir / "build" / "agent"
         agent_build.mkdir(parents=True)
         shutil.copy(_images_root() / "agent" / "Dockerfile", agent_build / "Dockerfile")
@@ -143,32 +176,32 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
         shutil.copy(creds_src, input_dir / ".credentials.json")
         (input_dir / ".credentials.json").chmod(0o600)
 
-        # 4. Bare repo for the user to fetch from
+        # 3. Bare repo for the user to fetch from
         repo.init_bare_repo(sdir / "bare.git")
 
-        # 5. Render and write compose.yml
+        # 4. Render and write compose.yml (db_image is upstream postgres:16)
         cfg = compose.ComposeConfig(
             session_id=meta.id,
             goal=args.goal,
-            db_image=meta.db_image,
+            db_image="postgres:16",
             agent_image_name=args.agent_image,
             build_dir_agent="./build/agent",
             db_name=args.db_name,
         )
         (sdir / "compose.yml").write_text(compose.render(cfg))
 
-        # 6. Up (compose template lowercases the project name)
+        # 5. Up (compose template lowercases the project name)
         docker.compose_up(project=project, compose_file=sdir / "compose.yml", build=True, detach=True)
 
+        # 6. Import dump into running db container BEFORE handing inputs to agent
+        db_container = docker.container_name(project=project, service="db")
+        _wait_for_db_ready(container=db_container, db_name=args.db_name)
+        _import_dump_at_runtime(container=db_container, local_dump=local_dump, db_name=args.db_name)
+
+        # 7. Hand repo bundle + creds to running agent container
         container = docker.container_name(project=project, service="agent")
-        docker.cp(
-            src=str(input_dir / "repo.bundle"),
-            dst=f"{container}:/input/repo.bundle",
-        )
-        docker.cp(
-            src=str(input_dir / ".credentials.json"),
-            dst=f"{container}:/input/.credentials.json",
-        )
+        docker.cp(src=str(input_dir / "repo.bundle"), dst=f"{container}:/input/repo.bundle")
+        docker.cp(src=str(input_dir / ".credentials.json"), dst=f"{container}:/input/.credentials.json")
     finally:
         _cleanup_sensitive_build_inputs(sdir)
 
