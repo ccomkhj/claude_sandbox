@@ -126,6 +126,23 @@ def test_isolation_invariants(
             f"non-allowlisted host returned code {code!r} — expected 403 (proxy denied) "
             f"or 000 (no response). If this returned 200, the egress boundary is broken."
         )
+
+        # v0.5 invariant: AWS endpoints are reachable through the proxy (allowlist includes .amazonaws.com)
+        res = subprocess.run([
+            "docker", "exec", agent_name,
+            "curl", "--max-time", "15", "-sS", "-o", "/dev/null",
+            "-w", "%{http_code}",
+            "https://s3.amazonaws.com/",
+        ], capture_output=True, text=True)
+        code = res.stdout.strip()
+        # Any HTTP response code (2xx/3xx/4xx) proves the proxy let us reach S3.
+        # We expect 403/400 from anonymous S3, but NOT 000 (no response) and NOT a curl error.
+        assert res.returncode == 0, (
+            f"AWS endpoint unreachable through proxy: rc={res.returncode}, stderr={res.stderr}"
+        )
+        assert code.isdigit() and code.startswith(("2", "3", "4")), (
+            f"unexpected HTTP code from s3.amazonaws.com: {code!r} (expected 2xx/3xx/4xx)"
+        )
     finally:
         # Always tear down, even if assertions failed.
         cli.main(["stop", sid])

@@ -1,4 +1,5 @@
 import shutil as _sh
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -93,3 +94,122 @@ def test_end_to_end_with_stub_agent(
     finally:
         subprocess.run(["docker", "compose", "-p", project, "down", "-v", "--rmi", "local"],
                        capture_output=True)
+
+
+@pytest.mark.integration
+def test_live_postgres_source_end_to_end(
+    docker_available, fixture_repo, fake_auth_env, sandbox_home, monkeypatch, tmp_path, capsys
+):
+    """Spin up a real postgres:16 container; pass --postgres-source pointing at it; expect a full session round-trip."""
+    if not docker_available:
+        pytest.skip("docker daemon not available")
+
+    # Find an unused port on the host for the source DB
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    source_port = sock.getsockname()[1]
+    sock.close()
+
+    source_container = f"sandbox-pg-source-{source_port}"
+
+    # Start a postgres:16 container on the host, seeded with a tiny table
+    subprocess.run([
+        "docker", "run", "-d", "--rm",
+        "--name", source_container,
+        "-p", f"{source_port}:5432",
+        "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
+        "-e", "POSTGRES_DB=appdb",
+        "postgres:16",
+    ], check=True, capture_output=True, text=True)
+
+    try:
+        # Wait for the source DB to accept connections
+        deadline = time.time() + 60
+        ready = False
+        while time.time() < deadline:
+            probe = subprocess.run([
+                "docker", "exec", source_container,
+                "pg_isready", "-U", "postgres", "-d", "appdb",
+            ], capture_output=True, text=True)
+            if probe.returncode == 0:
+                ready = True
+                break
+            time.sleep(1)
+        assert ready, "source postgres never became ready"
+
+        # Seed it with a tiny table
+        subprocess.run([
+            "docker", "exec", source_container,
+            "psql", "-U", "postgres", "-d", "appdb",
+            "-c", "CREATE TABLE marker (note text); INSERT INTO marker VALUES ('hello-from-source');",
+        ], check=True, capture_output=True, text=True)
+
+        # Patch images_root to use agent-stub (we don't need real claude here)
+        images_real = Path(__file__).resolve().parents[2] / "images"
+        images_patched = tmp_path / "images"
+        images_patched.mkdir()
+        (images_patched / "agent").mkdir()
+        (images_patched / "proxy").mkdir()
+        _sh.copy(images_real / "agent-stub" / "Dockerfile", images_patched / "agent" / "Dockerfile")
+        _sh.copy(images_real / "agent-stub" / "entrypoint.sh", images_patched / "agent" / "entrypoint.sh")
+        _sh.copy(images_real / "proxy" / "Dockerfile", images_patched / "proxy" / "Dockerfile")
+        _sh.copy(images_real / "proxy" / "entrypoint.sh", images_patched / "proxy" / "entrypoint.sh")
+
+        monkeypatch.setattr(cli, "_images_root", lambda: images_patched)
+
+        # Run sandbox start with --postgres-source pointing at the host port.
+        # Use host.docker.internal so the one-shot pg_dump container can reach the source DB on the host.
+        # NOTE: host.docker.internal works on Docker Desktop (mac/win). On Linux it is not
+        # auto-defined — the bridge gateway IP (172.17.0.1) may be needed instead.
+        source_url = f"postgres://postgres@host.docker.internal:{source_port}/appdb"
+        rc = cli.main([
+            "start",
+            "--repo", str(fixture_repo),
+            "--goal", "live pg dump test",
+            "--postgres-source", source_url,
+            "--db-name", "appdb",
+            "--agent-image", "sandbox-agent-livepg",
+        ])
+        assert rc == 0
+        sid = capsys.readouterr().out.strip().splitlines()[-1]
+        project = sid.lower()
+
+        # Wait for the stub agent to exit
+        agent_name = f"{project}-agent-1"
+        deadline = time.time() + 180
+        exited = False
+        while time.time() < deadline:
+            ps = subprocess.run(
+                ["docker", "ps", "-a", "--filter", f"name={agent_name}", "--format", "{{.Status}}"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            if "Exited" in ps:
+                exited = True
+                break
+            time.sleep(2)
+
+        try:
+            assert exited, "agent stub container never exited"
+
+            rc = cli.main(["finish", sid])
+            assert rc == 0
+
+            # The bare repo should have the stub's commit
+            bare = session.session_dir(sid) / "bare.git"
+            log = subprocess.run(
+                ["git", "-C", str(bare), "log", "--format=%s", f"sandbox/{sid}"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            assert "stub: live pg dump test" in log
+        finally:
+            # Best-effort cleanup of the sandbox session
+            subprocess.run(
+                ["docker", "compose", "-p", project, "down", "-v", "--rmi", "local"],
+                capture_output=True,
+            )
+    finally:
+        # Tear down the source postgres
+        subprocess.run(
+            ["docker", "rm", "-f", source_container],
+            capture_output=True,
+        )
