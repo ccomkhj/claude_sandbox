@@ -773,3 +773,44 @@ def test_main_translates_session_not_found_to_friendly_error(sandbox_home, capsy
     assert "no session" in err.lower()
     # And no traceback should leak through to stderr
     assert "Traceback" not in err
+
+
+def test_resolve_allowlist_with_default_group():
+    fqdns = cli._resolve_allowlist(groups="default", extra="")
+    assert "api.anthropic.com" in fqdns
+    assert "github.com" in fqdns
+    assert "pypi.org" in fqdns
+    assert "registry.npmjs.org" in fqdns
+
+
+def test_resolve_allowlist_with_subset_of_groups():
+    fqdns = cli._resolve_allowlist(groups="anthropic,github", extra="")
+    assert "api.anthropic.com" in fqdns
+    assert "github.com" in fqdns
+    assert "pypi.org" not in fqdns
+    assert "registry.npmjs.org" not in fqdns
+
+
+def test_resolve_allowlist_with_extra_domains():
+    fqdns = cli._resolve_allowlist(groups="anthropic", extra="data.example.com,assets.example.com")
+    assert "api.anthropic.com" in fqdns
+    assert "data.example.com" in fqdns
+    assert "assets.example.com" in fqdns
+
+
+def test_resolve_allowlist_dedupes():
+    fqdns = cli._resolve_allowlist(groups="anthropic", extra="api.anthropic.com,api.anthropic.com")
+    assert len(fqdns) == len(set(fqdns))
+
+
+def test_resolve_allowlist_rejects_unknown_group():
+    with pytest.raises(ValueError, match="unknown egress group"):
+        cli._resolve_allowlist(groups="anthropic,does_not_exist", extra="")
+
+
+def test_resolve_allowlist_handles_empty_groups_and_extras():
+    # Empty strings between commas, leading/trailing whitespace
+    fqdns = cli._resolve_allowlist(groups="anthropic, , github", extra=" data.example.com, ")
+    assert "api.anthropic.com" in fqdns
+    assert "github.com" in fqdns
+    assert "data.example.com" in fqdns

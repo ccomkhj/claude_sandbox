@@ -10,6 +10,33 @@ from pathlib import Path
 
 from sandbox import compose, docker, dump, repo, session
 
+EGRESS_ALLOWLIST_GROUPS: dict[str, tuple[str, ...]] = {
+    "anthropic": (
+        "api.anthropic.com",
+        "console.anthropic.com",
+    ),
+    "github": (
+        "github.com",
+        ".github.com",
+        ".githubusercontent.com",
+        "api.github.com",
+    ),
+    "python": (
+        "pypi.org",
+        "files.pythonhosted.org",
+        "pythonhosted.org",
+    ),
+    "node": (
+        "registry.npmjs.org",
+        ".npmjs.org",
+    ),
+}
+EGRESS_ALLOWLIST_GROUPS["default"] = tuple(
+    fqdn
+    for group in ("anthropic", "github", "python", "node")
+    for fqdn in EGRESS_ALLOWLIST_GROUPS[group]
+)
+
 
 def _agent_image_tag(base: str, sid: str) -> str:
     return f"{base}:{sid}"
@@ -112,6 +139,34 @@ def _cleanup_compose_project(meta: session.Meta) -> None:
         pass
 
 
+def _resolve_allowlist(*, groups: str, extra: str) -> list[str]:
+    """Resolve comma-separated group names + extra FQDNs into a deduped, ordered list.
+
+    `groups` is a comma-separated subset of EGRESS_ALLOWLIST_GROUPS keys.
+    `extra` is comma-separated FQDNs to append.
+    Whitespace around entries is stripped; empty entries are ignored.
+    Order is preserved, duplicates dropped.
+    Raises ValueError for an unknown group name.
+    """
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for group in (g.strip() for g in groups.split(",") if g.strip()):
+        if group not in EGRESS_ALLOWLIST_GROUPS:
+            raise ValueError(
+                f"unknown egress group {group!r}. "
+                f"Known groups: {sorted(EGRESS_ALLOWLIST_GROUPS)}"
+            )
+        for fqdn in EGRESS_ALLOWLIST_GROUPS[group]:
+            if fqdn not in seen_set:
+                seen.append(fqdn)
+                seen_set.add(fqdn)
+    for fqdn in (f.strip() for f in extra.split(",") if f.strip()):
+        if fqdn not in seen_set:
+            seen.append(fqdn)
+            seen_set.add(fqdn)
+    return seen
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sandbox")
     sub = p.add_subparsers(dest="verb", required=True)
@@ -123,6 +178,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dump-key", required=True)
     sp.add_argument("--db-name", default="appdb")
     sp.add_argument("--agent-image", default="sandbox-agent", help="base name of per-session agent image")
+    sp.add_argument(
+        "--egress-allowlist",
+        default="default",
+        help="comma-separated egress allowlist groups (default: 'default'). "
+             "Known groups: anthropic, github, python, node, default.",
+    )
+    sp.add_argument(
+        "--extra-egress-allowlist",
+        default="",
+        help="comma-separated extra FQDNs to append to the allowlist",
+    )
 
     for verb in ("status", "logs", "finish", "stop"):
         s = sub.add_parser(verb)
