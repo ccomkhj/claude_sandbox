@@ -77,6 +77,31 @@ def _terminate_follower(meta: session.Meta) -> None:
             pass
 
 
+def _render_proxy_config(*, allowlist_fqdns: list[str], sdir: Path) -> Path:
+    """Render squid.conf into sdir/proxy/allowlist.conf and return the path."""
+    proxy_dir = sdir / "proxy"
+    proxy_dir.mkdir(parents=True, exist_ok=True)
+    config_path = proxy_dir / "allowlist.conf"
+    config_path.write_text(compose.render_squid_config(allowlist_fqdns=allowlist_fqdns))
+    return config_path
+
+
+def _wait_for_proxy_ready(*, container: str, timeout_s: float = 60.0) -> None:
+    """Poll docker inspect for the proxy container's healthcheck status."""
+    deadline = _time.time() + timeout_s
+    while _time.time() < deadline:
+        try:
+            result = docker._run(
+                ["docker", "inspect", "--format", "{{.State.Health.Status}}", container]
+            )
+            if result.stdout.strip() == "healthy":
+                return
+        except Exception:
+            pass
+        _time.sleep(1.0)
+    raise RuntimeError(f"proxy container {container} never became healthy")
+
+
 def _wait_for_db_ready(*, container: str, db_name: str, timeout_s: float = 60.0) -> None:
     deadline = _time.time() + timeout_s
     last_err = None
@@ -259,10 +284,20 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
         shutil.copy(creds_src, input_dir / ".credentials.json")
         (input_dir / ".credentials.json").chmod(0o600)
 
-        # 3. Bare repo for the user to fetch from
+        # 3. Resolve allowlist and render proxy config BEFORE compose up
+        allowlist_fqdns = _resolve_allowlist(
+            groups=args.egress_allowlist,
+            extra=args.extra_egress_allowlist,
+        )
+        proxy_config_path = _render_proxy_config(allowlist_fqdns=allowlist_fqdns, sdir=sdir)
+
+        # 4. Build the proxy image (idempotent across sessions — shared tag, layers cached)
+        docker.build(context=_images_root() / "proxy", tag="sandbox-proxy:latest")
+
+        # 5. Bare repo for the user to fetch from
         repo.init_bare_repo(sdir / "bare.git")
 
-        # 4. Render and write compose.yml (db_image is upstream postgres:16)
+        # 6. Render and write compose.yml (db_image is upstream postgres:16)
         cfg = compose.ComposeConfig(
             session_id=meta.id,
             goal=args.goal,
@@ -270,18 +305,25 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
             agent_image_name=args.agent_image,
             build_dir_agent="./build/agent",
             db_name=args.db_name,
+            proxy_image="sandbox-proxy:latest",
         )
         (sdir / "compose.yml").write_text(compose.render(cfg))
 
-        # 5. Up (compose template lowercases the project name)
+        # 7. Up (compose template lowercases the project name)
+        # The proxy container starts but its entrypoint blocks waiting for the config file.
         docker.compose_up(project=project, compose_file=sdir / "compose.yml", build=True, detach=True)
 
-        # 6. Import dump into running db container BEFORE handing inputs to agent
+        # 8. Install proxy config into the proxy container; proxy then starts squid
+        proxy_container = docker.container_name(project=project, service="proxy")
+        docker.cp(src=str(proxy_config_path), dst=f"{proxy_container}:/etc/squid/conf.d/allowlist.conf")
+        _wait_for_proxy_ready(container=proxy_container)
+
+        # 9. Import dump into running db container BEFORE handing inputs to agent
         db_container = docker.container_name(project=project, service="db")
         _wait_for_db_ready(container=db_container, db_name=args.db_name)
         _import_dump_at_runtime(container=db_container, local_dump=local_dump, db_name=args.db_name)
 
-        # 7. Hand repo bundle + creds to running agent container
+        # 10. Hand repo bundle + creds to running agent container
         container = docker.container_name(project=project, service="agent")
         docker.cp(src=str(input_dir / "repo.bundle"), dst=f"{container}:/input/repo.bundle")
         docker.cp(src=str(input_dir / ".credentials.json"), dst=f"{container}:/input/.credentials.json")

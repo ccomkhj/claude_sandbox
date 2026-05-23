@@ -48,6 +48,7 @@ def test_start_orchestrates_and_prints_session_id(sandbox_home, tmp_path, monkey
     monkeypatch.setattr(cli.docker, "compose_logs_follow", fake_logs)
     monkeypatch.setattr(cli.docker, "exec_in_container", fake_exec)
     monkeypatch.setattr(cli, "_wait_for_db_ready", MagicMock())
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", MagicMock())
 
     rc = cli.main([
         "start",
@@ -150,6 +151,7 @@ def test_start_tears_down_compose_when_input_copy_fails(
     monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
     monkeypatch.setattr(cli.docker, "cp", MagicMock(side_effect=RuntimeError("cp boom")))
     monkeypatch.setattr(cli, "_wait_for_db_ready", MagicMock())
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", MagicMock())
     compose_down = MagicMock()
     remove_images = MagicMock()
     monkeypatch.setattr(cli.docker, "compose_down", compose_down)
@@ -201,6 +203,7 @@ def test_start_passes_lowercased_project_to_docker(
     monkeypatch.setattr(cli.docker, "compose_logs_follow", fake_logs)
     monkeypatch.setattr(cli.docker, "exec_in_container", fake_exec)
     monkeypatch.setattr(cli, "_wait_for_db_ready", MagicMock())
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", MagicMock())
 
     rc = cli.main([
         "start", "--repo", str(src), "--goal", "g",
@@ -532,6 +535,7 @@ def test_start_imports_dump_at_runtime_not_via_image_build(
                         lambda **kw: exec_calls.append(kw) or MagicMock(returncode=0))
     monkeypatch.setattr(cli.docker, "cp", lambda **kw: cp_calls.append(kw) or MagicMock(returncode=0))
     monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
 
     rc = cli.main([
         "start", "--repo", str(src), "--goal", "g",
@@ -814,3 +818,96 @@ def test_resolve_allowlist_handles_empty_groups_and_extras():
     assert "api.anthropic.com" in fqdns
     assert "github.com" in fqdns
     assert "data.example.com" in fqdns
+
+
+def test_start_renders_session_squid_config_from_allowlist_flags(
+    sandbox_home, tmp_path, monkeypatch, capsys
+):
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    creds = tmp_path / "creds_home" / ".claude"
+    creds.mkdir(parents=True)
+    (creds / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli.docker, "cp", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+        "--egress-allowlist", "anthropic",
+        "--extra-egress-allowlist", "data.example.com",
+    ])
+    assert rc == 0
+
+    sids = list((sandbox_home / "sessions").iterdir())
+    assert len(sids) == 1
+    squid_conf = sids[0] / "proxy" / "allowlist.conf"
+    assert squid_conf.is_file()
+    text = squid_conf.read_text()
+    assert "api.anthropic.com" in text
+    assert "data.example.com" in text
+    assert "github.com" not in text  # not requested
+
+
+def test_start_installs_proxy_config_before_agent_inputs(sandbox_home, tmp_path, monkeypatch, capsys):
+    """The proxy config must be cp'd into the proxy container BEFORE the agent
+    gets its repo bundle. Otherwise the agent could start making HTTPS calls
+    while the proxy has no allowlist."""
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    creds = tmp_path / "creds_home" / ".claude"
+    creds.mkdir(parents=True)
+    (creds / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
+
+    cp_call_order = []
+    def fake_cp(*, src, dst):
+        cp_call_order.append((str(src), str(dst)))
+        return MagicMock(returncode=0)
+    monkeypatch.setattr(cli.docker, "cp", fake_cp)
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+    ])
+    assert rc == 0
+
+    squid_idx = next(i for i, (s, d) in enumerate(cp_call_order) if "allowlist.conf" in s)
+    bundle_idx = next(i for i, (s, d) in enumerate(cp_call_order) if "repo.bundle" in s)
+    assert squid_idx < bundle_idx, (
+        f"squid config (idx {squid_idx}) must be cp'd before repo.bundle (idx {bundle_idx})"
+    )
