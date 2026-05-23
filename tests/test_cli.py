@@ -206,9 +206,12 @@ def test_start_passes_lowercased_project_to_docker(
     assert fake_logs.call_args.kwargs["project"] == project
 
 
-def test_start_requires_dump_bucket_and_key(monkeypatch):
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["start", "--repo", "/tmp/r", "--goal", "g"])
+def test_start_requires_dump_bucket_and_key(sandbox_home, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+    rc = cli.main(["start", "--repo", "/tmp/r", "--goal", "g", "--db-name", "appdb"])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "--postgres-source" in err or "--dump-bucket" in err
 
 
 def test_status_prints_metadata(sandbox_home, monkeypatch, capsys):
@@ -1131,3 +1134,164 @@ def test_no_aws_flags_means_no_aws_credentials_passed(
     ])
     assert rc == 0
     assert captured_compose[0].aws_credentials is None
+
+
+def test_start_requires_either_postgres_source_or_dump_bucket(sandbox_home, tmp_path, monkeypatch, capsys):
+    """Neither flag set → error."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    rc = cli.main([
+        "start", "--repo", "/tmp", "--goal", "g", "--db-name", "appdb",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "--postgres-source" in err
+    assert "--dump-bucket" in err
+
+
+def test_start_rejects_both_postgres_source_and_dump_bucket(sandbox_home, monkeypatch, capsys):
+    """Both modes set → error."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    rc = cli.main([
+        "start", "--repo", "/tmp", "--goal", "g", "--db-name", "appdb",
+        "--postgres-source", "postgres://u@h/db",
+        "--dump-bucket", "b", "--dump-key", "k",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "mutually exclusive" in err or "either" in err.lower()
+
+
+def test_start_uses_postgres_source_when_set(sandbox_home, tmp_path, monkeypatch, capsys):
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    fetch_url_calls = []
+    def fake_fetch_url(url, *, max_age):
+        fetch_url_calls.append({"url": url, "max_age": max_age})
+        return (tmp_path / "fake.dump", "etag-url")
+    monkeypatch.setattr(cli.dump, "fetch_from_postgres_url", fake_fetch_url)
+
+    s3_fetch_calls = []
+    def fake_fetch_s3(bucket, key):
+        s3_fetch_calls.append((bucket, key))
+        return (tmp_path / "fake.dump", "etag-s3")
+    monkeypatch.setattr(cli.dump, "fetch", fake_fetch_s3)
+
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli.docker, "cp", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g", "--db-name", "appdb",
+        "--postgres-source", "postgres://test_user@my-rds.example.com/appdb",
+    ])
+    assert rc == 0
+    assert len(fetch_url_calls) == 1
+    assert fetch_url_calls[0]["url"] == "postgres://test_user@my-rds.example.com/appdb"
+    assert s3_fetch_calls == []
+
+
+def test_start_uses_dump_bucket_when_set_regression(sandbox_home, tmp_path, monkeypatch, capsys):
+    """Existing S3 path still works."""
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    s3_fetch_calls = []
+    monkeypatch.setattr(cli.dump, "fetch", lambda b, k: (s3_fetch_calls.append((b, k)) or (tmp_path / "fake.dump", "etag-s3")))
+
+    url_fetch_calls = []
+    def fake_url_fetch(url, *, max_age):
+        url_fetch_calls.append(url)
+        return (tmp_path / "fake.dump", "etag-url")
+    monkeypatch.setattr(cli.dump, "fetch_from_postgres_url", fake_url_fetch)
+
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli.docker, "cp", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g", "--db-name", "appdb",
+        "--dump-bucket", "my-bucket", "--dump-key", "prod/latest.dump",
+    ])
+    assert rc == 0
+    assert s3_fetch_calls == [("my-bucket", "prod/latest.dump")]
+    assert url_fetch_calls == []
+
+
+def test_parse_duration_handles_common_forms():
+    from datetime import timedelta
+    assert cli._parse_duration("30s") == timedelta(seconds=30)
+    assert cli._parse_duration("5m") == timedelta(minutes=5)
+    assert cli._parse_duration("1h") == timedelta(hours=1)
+    assert cli._parse_duration("  2h ") == timedelta(hours=2)
+
+
+def test_parse_duration_rejects_garbage():
+    with pytest.raises(ValueError, match="unparseable duration"):
+        cli._parse_duration("forever")
+
+
+def test_start_passes_max_dump_age_to_fetch_from_postgres_url(sandbox_home, tmp_path, monkeypatch, capsys):
+    import subprocess
+    from datetime import timedelta
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    captured = {}
+    def fake_fetch_url(url, *, max_age):
+        captured["max_age"] = max_age
+        return (tmp_path / "fake.dump", "etag")
+    monkeypatch.setattr(cli.dump, "fetch_from_postgres_url", fake_fetch_url)
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli.docker, "cp", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    cli.main([
+        "start", "--repo", str(src), "--goal", "g", "--db-name", "appdb",
+        "--postgres-source", "postgres://u@h/db",
+        "--max-dump-age", "30m",
+    ])
+    assert captured["max_age"] == timedelta(minutes=30)

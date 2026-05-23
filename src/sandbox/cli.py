@@ -6,7 +6,7 @@ import os
 import shutil
 import sys
 import time as _time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sandbox import compose, docker, dump, repo, session
@@ -50,6 +50,23 @@ class HostAuthMissing(RuntimeError):
 
 class _AwsFlagError(RuntimeError):
     """Raised when AWS CLI flags are used incorrectly; cmd_start converts this to rc=2."""
+
+
+def _parse_duration(s: str) -> timedelta:
+    """Parse forms like '30s', '5m', '1h'. Raise ValueError on garbage."""
+    s = s.strip().lower()
+    if not s:
+        raise ValueError(f"unparseable duration {s!r}; expected '30s', '5m', '1h'")
+    try:
+        if s.endswith("s"):
+            return timedelta(seconds=int(s[:-1]))
+        if s.endswith("m"):
+            return timedelta(minutes=int(s[:-1]))
+        if s.endswith("h"):
+            return timedelta(hours=int(s[:-1]))
+    except ValueError:
+        pass
+    raise ValueError(f"unparseable duration {s!r}; expected forms like '30s', '5m', '1h'")
 
 
 def _resolve_host_auth() -> tuple[str, str]:
@@ -276,8 +293,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("start", help="start a new sandboxed session")
     sp.add_argument("--repo", required=True, help="host path to the repo to copy into the sandbox")
     sp.add_argument("--goal", required=True, help="goal prompt passed to Claude Code")
-    sp.add_argument("--dump-bucket", required=True)
-    sp.add_argument("--dump-key", required=True)
+    sp.add_argument("--dump-bucket", default=None, help="S3 bucket containing a frozen pg_dump (mutually exclusive with --postgres-source)")
+    sp.add_argument("--dump-key", default=None, help="S3 key of the pg_dump within --dump-bucket")
+    sp.add_argument(
+        "--postgres-source",
+        default=None,
+        help="Live Postgres connection URL; CLI runs pg_dump in a one-shot container against it. "
+             "Mutually exclusive with --dump-bucket/--dump-key. Password may be embedded in the URL or "
+             "set via PGPASSWORD env. Cached for --max-dump-age.",
+    )
+    sp.add_argument(
+        "--max-dump-age",
+        default="1h",
+        help="When using --postgres-source, reuse a cached dump newer than this. "
+             "Forms: 30s, 5m, 2h. Default: 1h.",
+    )
     sp.add_argument("--db-name", default="appdb")
     sp.add_argument("--agent-image", default="sandbox-agent", help="base name of per-session agent image")
     sp.add_argument(
@@ -325,6 +355,20 @@ def _images_root() -> Path:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
+    # Validate dump source flags BEFORE any state is created
+    if args.postgres_source and (args.dump_bucket or args.dump_key):
+        print(
+            "error: --postgres-source is mutually exclusive with --dump-bucket/--dump-key",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.postgres_source and not (args.dump_bucket and args.dump_key):
+        print(
+            "error: must specify either --postgres-source URL or both --dump-bucket B --dump-key K",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         auth_env_name, auth_env_value = _resolve_host_auth()
     except HostAuthMissing as e:
@@ -370,7 +414,11 @@ def _start_session(
 
     try:
         # 1. Fetch dump (cached by ETag)
-        local_dump, _etag = dump.fetch(args.dump_bucket, args.dump_key)
+        if args.postgres_source:
+            max_age = _parse_duration(args.max_dump_age)
+            local_dump, _etag = dump.fetch_from_postgres_url(args.postgres_source, max_age=max_age)
+        else:
+            local_dump, _etag = dump.fetch(args.dump_bucket, args.dump_key)
 
         # 2. Assemble agent build context (db is now upstream postgres:16; no build)
         agent_build = sdir / "build" / "agent"
