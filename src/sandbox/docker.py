@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import signal as _signal
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -71,3 +74,29 @@ def remove_images(*images: str) -> subprocess.CompletedProcess:
 
 def container_name(*, project: str, service: str, index: int = 1) -> str:
     return f"{project}-{service}-{index}"
+
+
+def exec_in_container(*, container: str, cmd: list[str]) -> subprocess.CompletedProcess:
+    return _run(["docker", "exec", container, *cmd])
+
+
+def terminate_pid(pid: int, timeout_s: float = 5.0) -> None:
+    """SIGTERM the process, wait up to timeout_s for it to exit, then SIGKILL.
+
+    Tolerates ProcessLookupError at every step (process already gone).
+    """
+    try:
+        os.kill(pid, _signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)  # probe — does process still exist?
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(pid, _signal.SIGKILL)
+    except ProcessLookupError:
+        pass

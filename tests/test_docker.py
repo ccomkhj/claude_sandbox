@@ -109,3 +109,68 @@ def test_compose_logs_follow_argv_and_kwargs(monkeypatch, tmp_path):
     assert captured["kwargs"]["stderr"] == subprocess.STDOUT
     # The parent dir was created
     assert log_path.parent.is_dir()
+
+
+def test_exec_in_container_argv(monkeypatch):
+    captured = []
+    monkeypatch.setattr(docker, "_run", make_fake_run(captured))
+    docker.exec_in_container(container="abc-db-1", cmd=["pg_restore", "--dbname", "appdb", "/tmp/dump.dump"])
+    assert captured == [["docker", "exec", "abc-db-1", "pg_restore", "--dbname", "appdb", "/tmp/dump.dump"]]
+
+
+def test_terminate_pid_sends_sigterm_then_sigkill(monkeypatch):
+    import os
+    import signal as _signal
+    calls = []
+
+    def fake_kill(pid, sig):
+        calls.append((pid, sig))
+        # Pretend process never exits — always succeeds with signal 0 too.
+
+    # Fast clock so the timeout fires quickly
+    fake_time = [0.0]
+    def fake_monotonic():
+        fake_time[0] += 1.0  # each call advances by 1s
+        return fake_time[0]
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(docker.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(docker.time, "sleep", lambda s: None)
+
+    docker.terminate_pid(4242, timeout_s=2.0)
+
+    signals = [sig for _pid, sig in calls]
+    assert _signal.SIGTERM in signals  # first signal sent
+    assert _signal.SIGKILL in signals  # eventually escalated
+
+
+def test_terminate_pid_exits_early_when_process_already_gone(monkeypatch):
+    import os
+    calls = []
+
+    def fake_kill(pid, sig):
+        calls.append((pid, sig))
+        # First call (SIGTERM) succeeds; subsequent probe (signal 0) reports gone
+        if len(calls) >= 2:
+            raise ProcessLookupError()
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(docker.time, "sleep", lambda s: None)
+    # monotonic just needs to not infinite-loop
+    monkeypatch.setattr(docker.time, "monotonic", lambda: 0.0)
+
+    docker.terminate_pid(4242, timeout_s=5.0)
+
+    # SIGTERM was sent; SIGKILL should NOT be sent (process exited before timeout)
+    signals = [sig for _pid, sig in calls]
+    import signal as _signal
+    assert _signal.SIGKILL not in signals
+
+
+def test_terminate_pid_tolerates_already_gone(monkeypatch):
+    import os
+    def fake_kill(pid, sig):
+        raise ProcessLookupError()
+    monkeypatch.setattr(os, "kill", fake_kill)
+    # Should not raise
+    docker.terminate_pid(4242)
