@@ -4,7 +4,7 @@ Run Claude Code on production-data tasks without giving the agent your host mach
 
 ## Why
 
-Long-running, autonomous Claude Code goals — refactors, migrations, debugging — usually need a copy of production data to be useful. But running an agent against your live Postgres is reckless, and running it on your laptop gives it your filesystem, your SSH keys, and your whole machine. This repo spawns a per-task sandbox: fresh Postgres from an S3 dump, isolated FS, allowlisted internet egress, and the agent's work returned as a reviewable git branch.
+Long-running, autonomous Claude Code goals — refactors, migrations, debugging — usually need a copy of production data to be useful. But running an agent against your live Postgres is reckless, and running it on your laptop gives it your filesystem, your SSH keys, and your whole machine. This repo spawns a per-task sandbox: fresh Postgres dumped from your real DB (or a frozen S3 snapshot), STS-scoped read-only S3 access for app uploads, isolated filesystem, allowlisted internet egress, and the agent's work returned as a reviewable git branch.
 
 ## How it works
 
@@ -27,8 +27,9 @@ The CLI on the host assembles each session: pulls the Postgres dump from S3, cop
 
 - **Long-running detached sessions.** Kick off, walk away, retrieve when done. ULID session ids; multiple concurrent sessions.
 - **Claude subscription auth.** `claude setup-token` once on your host, export `CLAUDE_CODE_OAUTH_TOKEN`, use your Pro/Max/Team quota — no per-token API charges. `ANTHROPIC_API_KEY` falls back to API billing.
-- **Production Postgres dump from S3, runtime-restored.** Bucket-aware ETag cache; dump file lives only inside the running db container's overlay and is wiped post-restore.
-- **Allowlisted egress.** Agent reaches only Anthropic, GitHub, PyPI, and npm by default. Customize with `--egress-allowlist anthropic,github` or `--extra-egress-allowlist data.example.com`. Everything else gets a 403 from the Squid proxy.
+- **Postgres dump — live or frozen.** `--postgres-source postgres://…` runs `pg_dump` in a one-shot container against your real DB, caches it on the host (`--max-dump-age` controls TTL). Or `--dump-bucket B --dump-key K` pulls a pre-staged dump from S3 for reproducible CI runs. Either way the dump enters the sandbox via `docker cp` and never lives in an image layer.
+- **STS-scoped AWS access for the agent.** `--aws-profile X --s3-buckets b1,b2` calls `sts:GetFederationToken` with a session policy limited to `s3:GetObject` + `s3:ListBucket` on those buckets only. The agent inside the sandbox makes real boto3 calls; your raw credentials never leave the host. Escape hatch: `--aws-unsafe-passthrough` with a stderr warning.
+- **Allowlisted egress.** Agent reaches only Anthropic, GitHub, PyPI, npm, and `.amazonaws.com` by default. Customize with `--egress-allowlist anthropic,github,aws` or `--extra-egress-allowlist data.example.com`. Everything else gets a 403 from the Squid proxy.
 - **Repo round-trip via git bundle.** Host repo → bundle → cloned in container → agent edits → bundle out → host-side bare repo + `patch.diff`. No bind-mount of your working tree.
 - **Per-session ephemerality.** `sandbox finish` (or `stop`) tears down Compose, terminates the log follower, and removes the per-session agent image. `sandbox prune` cleans state dirs after 30 days.
 
@@ -61,9 +62,20 @@ Requires Docker (with `compose` v2), Python 3.11+, uv, and AWS credentials for t
 claude setup-token
 export CLAUDE_CODE_OAUTH_TOKEN=<value-from-setup-token>
 
-# Kick off a session
+# Kick off a session — live Postgres source (CLI runs pg_dump for you)
 sandbox start --repo ~/code/my-app --goal "refactor X to use the new payments module" \
+  --postgres-source 'postgres://readonly_user@my-rds.amazonaws.com:5432/appdb'
+# PGPASSWORD in env supplies the password; --max-dump-age 1h reuses the cached dump.
+
+# Or use a frozen pg_dump in S3 (CI / reproducible runs)
+sandbox start --repo ~/code/my-app --goal "..." \
   --dump-bucket my-dumps --dump-key prod/latest.dump
+
+# Let the agent read your S3 buckets — STS-scoped read-only credentials
+sandbox start --repo ~/code/my-app --goal "..." \
+  --postgres-source 'postgres://u@my-rds.amazonaws.com/appdb' \
+  --aws-profile readonly-prod \
+  --s3-buckets user-uploads,exports
 
 # Manage running sessions
 sandbox list                    # all sessions
@@ -78,8 +90,8 @@ sandbox prune                   # drop finished sessions >30 days old
 
 ```sh
 uv sync --all-extras
-uv run pytest                       # ~90 unit tests, <1s
-uv run pytest --run-integration     # +2 real-Docker tests, ~45s on cached layers
+uv run pytest                       # ~120 unit tests, <1s
+uv run pytest --run-integration     # +3 real-Docker tests, ~70s on cached layers
 uv run pytest --run-smoke           # +1 real-Claude smoke (needs CLAUDE_CODE_OAUTH_TOKEN)
 ```
 
