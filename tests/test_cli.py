@@ -654,3 +654,66 @@ def test_follower_termination_tolerates_missing_pid(sandbox_home, monkeypatch):
     rc = cli.main(["stop", m.id])
     assert rc == 0
     assert terminate_calls == []  # nothing to terminate
+
+
+def test_list_prints_session_summary(sandbox_home, monkeypatch, capsys):
+    import time as _t
+    a = session.new_session(goal="goal A", repo="/tmp/a")
+    a.status = "running"
+    session.save(a)
+    b = session.new_session(goal="goal B", repo="/tmp/b")
+    b.status = "finished"
+    b.finished_at = _t.time()
+    session.save(b)
+
+    rc = cli.main(["list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Header row
+    assert "ID" in out and "STATUS" in out
+    # Both session ids appear
+    assert a.id in out
+    assert b.id in out
+    # Both statuses appear
+    assert "running" in out
+    assert "finished" in out
+
+
+def test_list_empty(sandbox_home, capsys):
+    rc = cli.main(["list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no sessions" in out.lower()
+
+
+def test_status_renders_timestamps_human_readable(sandbox_home, monkeypatch, capsys):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    session.save(m)
+    monkeypatch.setattr(cli.docker, "compose_ps",
+                        lambda **kw: MagicMock(stdout='[{"Service":"agent","State":"running"}]'))
+
+    rc = cli.main(["status", m.id])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The raw epoch float should not appear in the output
+    assert str(m.started_at) not in out
+    # ISO-style date prefix appears (year-month-day)
+    import re
+    assert re.search(r"\d{4}-\d{2}-\d{2}", out), f"no ISO date in output:\n{out}"
+
+
+def test_status_renders_compose_state_human_readable(sandbox_home, monkeypatch, capsys):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    session.save(m)
+    monkeypatch.setattr(cli.docker, "compose_ps",
+                        lambda **kw: MagicMock(stdout='[{"Service":"agent","State":"running"},{"Service":"db","State":"healthy"}]'))
+
+    rc = cli.main(["status", m.id])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Should contain service=state pairs, not raw JSON
+    assert "agent=running" in out
+    assert "db=healthy" in out
+    assert '"Service"' not in out  # raw JSON shouldn't leak through

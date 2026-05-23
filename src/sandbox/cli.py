@@ -5,6 +5,7 @@ import json as _json
 import shutil
 import sys
 import time as _time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sandbox import compose, docker, dump, repo, session
@@ -90,6 +91,12 @@ def _import_dump_at_runtime(*, container: str, local_dump: Path, db_name: str) -
         docker.exec_in_container(container=container, cmd=["rm", "-f", "/tmp/dump.dump"])
 
 
+def _fmt_ts(epoch):
+    if epoch is None:
+        return "-"
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _cleanup_compose_project(meta: session.Meta) -> None:
     compose_file = session.session_dir(meta.id) / "compose.yml"
     if not compose_file.exists():
@@ -124,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("-f", "--follow", action="store_true")
 
     sub.add_parser("prune", help="remove finished sessions older than 30 days")
+    sub.add_parser("list", help="list all sessions")
 
     return p
 
@@ -234,16 +242,32 @@ def cmd_status(args: argparse.Namespace) -> int:
     sdir = session.session_dir(meta.id)
     try:
         ps = docker.compose_ps(project=meta.id.lower(), compose_file=sdir / "compose.yml")
-        compose_state = ps.stdout
+        rows = _json.loads(ps.stdout or "[]")
+        if isinstance(rows, dict):
+            rows = [rows]
+        compose_state = ", ".join(f"{r.get('Service', '?')}={r.get('State', '?')}" for r in rows) or "(no services)"
     except Exception as e:
         compose_state = f"<compose ps failed: {e}>"
-    print(f"id:      {meta.id}")
-    print(f"status:  {meta.status}")
-    print(f"goal:    {meta.goal}")
-    print(f"repo:    {meta.repo}")
-    print(f"branch:  {meta.branch}")
-    print(f"started: {meta.started_at}")
-    print(f"compose: {compose_state.strip()}")
+    print(f"id:       {meta.id}")
+    print(f"status:   {meta.status}")
+    print(f"goal:     {meta.goal}")
+    print(f"repo:     {meta.repo}")
+    print(f"branch:   {meta.branch}")
+    print(f"started:  {_fmt_ts(meta.started_at)}")
+    print(f"finished: {_fmt_ts(meta.finished_at)}")
+    print(f"compose:  {compose_state}")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    rows = session.all_sessions()
+    if not rows:
+        print("no sessions")
+        return 0
+    print(f"{'ID':<26}  {'STATUS':<10}  {'BRANCH':<30}  {'STARTED':<19}  GOAL")
+    for m in rows:
+        goal_short = (m.goal[:38] + "…") if len(m.goal) > 38 else m.goal
+        print(f"{m.id:<26}  {m.status:<10}  {m.branch:<30}  {_fmt_ts(m.started_at):<19}  {goal_short}")
     return 0
 
 
@@ -427,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         "finish": cmd_finish,
         "stop": cmd_stop,
         "prune": cmd_prune,
+        "list": cmd_list,
     }
     handler = dispatch.get(args.verb)
     if handler is None:
