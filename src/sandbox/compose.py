@@ -19,7 +19,6 @@ class ComposeConfig:
     goal: str
     db_image: str
     agent_image_name: str
-    build_dir_db: str
     build_dir_agent: str
     db_name: str
 

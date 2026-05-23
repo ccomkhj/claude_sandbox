@@ -10,9 +10,8 @@ def cfg(**overrides):
     base = ComposeConfig(
         session_id="01HK3P0000000000000000",
         goal="trivial goal",
-        db_image="sandbox-db:abc123",
+        db_image="postgres:16",
         agent_image_name="sandbox-agent",
-        build_dir_db="./build/db",
         build_dir_agent="./build/agent",
         db_name="appdb",
     )

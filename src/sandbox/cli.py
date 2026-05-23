@@ -152,7 +152,6 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
             goal=args.goal,
             db_image=meta.db_image,
             agent_image_name=args.agent_image,
-            build_dir_db="./build/db",
             build_dir_agent="./build/agent",
             db_name=args.db_name,
         )
