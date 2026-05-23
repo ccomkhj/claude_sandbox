@@ -717,3 +717,59 @@ def test_status_renders_compose_state_human_readable(sandbox_home, monkeypatch, 
     assert "agent=running" in out
     assert "db=healthy" in out
     assert '"Service"' not in out  # raw JSON shouldn't leak through
+
+
+def test_main_translates_docker_not_running_to_friendly_error(sandbox_home, monkeypatch, capsys):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    session.save(m)
+
+    def boom(**kw):
+        raise cli.docker.DockerNotRunning("daemon not reachable")
+    monkeypatch.setattr(cli.docker, "compose_ps", boom)
+
+    rc = cli.main(["status", m.id])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "Docker" in err
+    assert ("Desktop" in err or "daemon" in err.lower())
+
+
+def test_main_translates_no_aws_credentials_to_friendly_error(sandbox_home, tmp_path, monkeypatch, capsys):
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    creds = tmp_path / "creds_home" / ".claude"
+    creds.mkdir(parents=True)
+    (creds / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+
+    import botocore.exceptions
+    def boom(b, k):
+        raise botocore.exceptions.NoCredentialsError()
+    monkeypatch.setattr(cli.dump, "fetch", boom)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "AWS" in err
+    assert ("credentials" in err.lower() or "AWS_ACCESS_KEY_ID" in err)
+
+
+def test_main_translates_session_not_found_to_friendly_error(sandbox_home, capsys):
+    rc = cli.main(["status", "DOES_NOT_EXIST"])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "no session" in err.lower()
+    # And no traceback should leak through to stderr
+    assert "Traceback" not in err

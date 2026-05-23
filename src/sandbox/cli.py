@@ -246,6 +246,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         if isinstance(rows, dict):
             rows = [rows]
         compose_state = ", ".join(f"{r.get('Service', '?')}={r.get('State', '?')}" for r in rows) or "(no services)"
+    except docker.DockerNotRunning:
+        raise
     except Exception as e:
         compose_state = f"<compose ps failed: {e}>"
     print(f"id:       {meta.id}")
@@ -457,4 +459,29 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         print(f"verb {args.verb!r} not implemented yet", file=sys.stderr)
         return 1
-    return handler(args)
+    try:
+        return handler(args)
+    except docker.DockerNotRunning as e:
+        print(
+            "error: Docker daemon not reachable. Is Docker Desktop running?\n"
+            f"  detail: {e}",
+            file=sys.stderr,
+        )
+        return 3
+    except LookupError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 4
+    except Exception as e:
+        try:
+            import botocore.exceptions as _be
+            if isinstance(e, _be.NoCredentialsError):
+                print(
+                    "error: AWS credentials not found. Set AWS_ACCESS_KEY_ID and "
+                    "AWS_SECRET_ACCESS_KEY in your environment, or configure "
+                    "~/.aws/credentials.",
+                    file=sys.stderr,
+                )
+                return 5
+        except ImportError:
+            pass
+        raise

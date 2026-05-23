@@ -7,8 +7,24 @@ import time
 from pathlib import Path
 
 
+class DockerNotRunning(RuntimeError):
+    """Raised when the Docker daemon is not reachable."""
+
+
 def _run(argv: list[str], *, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, check=check, capture_output=capture, text=True)
+    try:
+        return subprocess.run(argv, check=check, capture_output=capture, text=True)
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").lower()
+        if any(s in stderr for s in (
+            "cannot connect to the docker daemon",
+            "is the docker daemon running",
+            "daemon socket",
+        )):
+            raise DockerNotRunning(
+                e.stderr.strip() if e.stderr else "Docker daemon not reachable"
+            ) from e
+        raise
 
 
 def _compose_base(project: str, compose_file: Path) -> list[str]:
