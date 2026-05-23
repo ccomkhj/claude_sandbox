@@ -34,14 +34,25 @@ The CLI on the host assembles each session: pulls the Postgres dump from S3, cop
 
 ## Install
 
+**Just use it** — install the CLI on your `PATH` via [uv](https://docs.astral.sh/uv/):
+
+```sh
+uv tool install git+https://github.com/ccomkhj/claude_sandbox.git
+sandbox --help
+```
+
+Upgrade with `uv tool upgrade claude-code-sandbox`, uninstall with `uv tool uninstall claude-code-sandbox`.
+
+**Develop on it:**
+
 ```sh
 git clone https://github.com/ccomkhj/claude_sandbox.git
 cd claude_sandbox
-uv venv && source .venv/bin/activate
-uv pip install -e .
+uv sync --all-extras           # creates .venv + installs deps + lockfile
+uv run sandbox --help          # runs without activating the venv
 ```
 
-Requires Docker (with `compose` v2), Python 3.11+, [uv](https://docs.astral.sh/uv/), and AWS credentials for the dump bucket.
+Requires Docker (with `compose` v2), Python 3.11+, uv, and AWS credentials for the dump bucket.
 
 ## Use
 
@@ -66,10 +77,10 @@ sandbox prune                   # drop finished sessions >30 days old
 ## Testing
 
 ```sh
-uv pip install -e '.[dev]'
-pytest                          # ~90 unit tests, <1s
-pytest --run-integration        # +2 real-Docker tests, ~45s on cached layers
-pytest --run-smoke              # +1 real-Claude smoke (needs CLAUDE_CODE_OAUTH_TOKEN)
+uv sync --all-extras
+uv run pytest                       # ~90 unit tests, <1s
+uv run pytest --run-integration     # +2 real-Docker tests, ~45s on cached layers
+uv run pytest --run-smoke           # +1 real-Claude smoke (needs CLAUDE_CODE_OAUTH_TOKEN)
 ```
 
 ## License
