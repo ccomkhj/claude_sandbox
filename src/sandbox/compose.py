@@ -26,3 +26,10 @@ class ComposeConfig:
 def render(cfg: ComposeConfig) -> str:
     tpl = _env.get_template("compose.yml.j2")
     return tpl.render(**cfg.__dict__)
+
+
+def render_squid_config(*, allowlist_fqdns: list[str]) -> str:
+    if not allowlist_fqdns:
+        raise ValueError("allowlist cannot be empty")
+    tpl = _env.get_template("squid.conf.j2")
+    return tpl.render(allowlist_fqdns=allowlist_fqdns)

@@ -1,0 +1,27 @@
+# Per-session Squid config rendered by sandbox-cli.
+# Listens on 3128; allowlist enforced via SNI on CONNECT for HTTPS, dstdomain for HTTP.
+
+http_port 3128
+
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 443
+acl CONNECT method CONNECT
+
+http_access deny CONNECT !SSL_ports
+http_access deny !Safe_ports
+
+{% for fqdn in allowlist_fqdns %}
+acl allowlisted_ssl ssl::server_name {{ fqdn }}
+acl allowlisted_http dstdomain {{ fqdn }}
+{% endfor %}
+
+http_access allow CONNECT allowlisted_ssl
+http_access allow allowlisted_http
+
+http_access deny all
+
+cache_log /dev/stderr
+access_log stdio:/dev/stdout squid
+
+cache deny all

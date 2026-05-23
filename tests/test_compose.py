@@ -80,3 +80,28 @@ def test_db_service_has_postgres_env():
     assert env.get("POSTGRES_HOST_AUTH_METHOD") == "trust"
     # initdb only creates appdb if POSTGRES_DB is set
     assert env.get("POSTGRES_DB") == "appdb"
+
+
+def test_squid_config_renders_with_allowlist():
+    from sandbox.compose import render_squid_config
+    out = render_squid_config(allowlist_fqdns=[
+        "api.anthropic.com",
+        ".github.com",
+        "pypi.org",
+    ])
+    assert "api.anthropic.com" in out
+    assert ".github.com" in out
+    assert "pypi.org" in out
+    # Squid recipe markers
+    assert "http_port 3128" in out
+    # We are NOT doing TLS MITM
+    assert "ssl_bump" not in out
+    assert "http_access allow" in out
+    # The catch-all deny must be present
+    assert "http_access deny all" in out
+
+
+def test_squid_config_rejects_empty_allowlist():
+    from sandbox.compose import render_squid_config
+    with pytest.raises(ValueError, match="allowlist cannot be empty"):
+        render_squid_config(allowlist_fqdns=[])
