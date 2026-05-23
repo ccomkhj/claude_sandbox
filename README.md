@@ -34,6 +34,14 @@ sandbox start \
   --db-name appdb
 # → prints session id, e.g. 01HK3P0000000000000000
 
+# Restrict egress (default: anthropic + github + python + node)
+sandbox start \
+  --repo ~/code/my-app \
+  --goal "..." \
+  --dump-bucket my-dumps --dump-key prod/latest.dump \
+  --egress-allowlist anthropic,github \
+  --extra-egress-allowlist data.example.com
+
 # Check on it
 sandbox status 01HK3P
 sandbox logs 01HK3P -f
@@ -57,15 +65,16 @@ sandbox prune
 - **No broad host filesystem access.** Inputs are copied into containers by the CLI, not exposed through bind mounts. The repo bundle and Claude credentials are copied into the already-running agent container with `docker cp`, then deleted from the host session input directory. Outputs come back via `docker cp` of a git bundle the agent writes on exit. The rendered `compose.yml` has zero host bind-mounts (asserted in tests).
 - **Database has no public network.** The Postgres container sits on a `internal: true` Docker network — reachable by the agent at `db:5432`, but cannot exfiltrate. Verified live by the isolation integration test.
 - **Per-session ephemerality.** Each session has its own compose project and agent image. The Postgres dump is `docker cp`'d into a stock `postgres:16` container at runtime and wiped immediately after restore — it never lives in an image layer. `sandbox finish` (or `sandbox stop`) tears down Compose resources, terminates the log follower, and removes the per-session agent image.
-
-The agent container intentionally keeps internet egress for Claude Code, GitHub, package registries, and similar tools. The integration test checks that `host.docker.internal` is not reachable on a common host-service path, but this is not a full outbound firewall.
+- **Allowlisted egress through a per-session proxy (v0.3.0).** The agent network is `internal: true` — the agent has **no direct path to the public internet**. Egress flows through a per-session Squid proxy on its own bridge network; only FQDNs on the rendered allowlist are reachable. The default allowlist covers Anthropic API, GitHub, PyPI, and npm. Customize with `--egress-allowlist anthropic,github` (subsetting) or `--extra-egress-allowlist data.example.com,assets.example.com` (one-off additions). Verified live by the isolation integration test: allowlisted hosts reachable, `example.com` returns Squid's 403.
 
 ## Testing
 
 ```sh
 pip install -e '.[dev]'
-pytest                          # fast unit tests (~66 tests, < 1s)
-pytest --run-integration        # also runs real-Docker tests (~5-15 min first time, ~30s on cached layers)
+pytest                          # fast unit tests (~82 tests, < 1s)
+pytest --run-integration        # also runs real-Docker tests (~5-15 min first time, ~45s on cached layers)
+pytest --run-smoke              # also exercises the real `claude` binary; needs ANTHROPIC_API_KEY
+                                # (or a fresh ~/.claude/.credentials.json on Linux)
 ```
 
 ## Design
