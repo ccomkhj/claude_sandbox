@@ -1,6 +1,6 @@
-# Progress — claude-code-sandbox v0.1.0 + post-review hardening
+# Progress — claude-code-sandbox v0.2.0
 
-**Status:** Initial implementation complete at tag `v0.1.0`; post-review hardening has been implemented locally and verified.
+**Status:** v0.2.0 shipped. Tag `v0.2.0` on `main`.
 
 `claude-code-sandbox` runs Claude Code in an isolated Docker sandbox against a production Postgres dump. The agent gets a fresh DB from S3, a copy of your repo on its own branch, and your existing Claude Code credentials without bind-mounting your host repo or credential directory. Long-running goal-mode tasks run detached; you retrieve the agent's branch when it's done.
 
@@ -39,12 +39,13 @@ The design's promised invariants are checked by live integration tests against a
 | Agent CAN reach DB on private network | Isolation test — `psql -h db -c "SELECT 1"` succeeds (Task 15) |
 | Repo changes return as a reviewable branch | E2E test bundle round-trip (Task 14) |
 | `patch.diff` scopes correctly to `main..agent-branch` | Tightened assertion catches the `--root` fallback (Task 12 fix) |
-| Per-session images removed explicitly | `finish` / `stop` call `docker image rm -f` for the custom agent and db image tags |
+| Per-session agent image removed explicitly | `finish` / `stop` call `docker image rm -f` for the custom agent tag (db now uses shared upstream `postgres:16`) |
+| Postgres dump never lives in an image layer | v0.2.0: db service uses upstream `postgres:16`; dump enters via `docker cp` at runtime and is wiped after `pg_restore` |
 
 ## Test status
 
 ```
-50 unit tests + 2 integration tests passing.
+66 unit tests + 2 integration tests passing.
 pytest                          # unit tests, < 1s
 pytest --run-integration        # also runs real-Docker tests, ~30s on cached layers
 ```
@@ -59,7 +60,7 @@ pytest --run-integration        # also runs real-Docker tests, ~30s on cached la
 | `sandbox.dump` | S3 fetch with bucket-aware hashed cache key; ETag invalidation |
 | `sandbox.docker` | Thin subprocess wrappers around `docker compose ...`, `docker cp`, `docker build`, `docker image rm` |
 | `sandbox.cli` | argparse entry point; orchestrates the verbs |
-| `images/db/` | `postgres:16` image with dump baked into `/docker-entrypoint-initdb.d/` |
+| `images/db/` | _removed in v0.2.0._ The db service uses the upstream `postgres:16` image; the dump is `docker cp`'d in at runtime and `pg_restore`d. |
 | `images/agent/` | `node:20-slim` + `@anthropic-ai/claude-code`; waits for copied inputs, shreds creds, bundles output |
 | `images/agent-stub/` | Deterministic stub for integration tests |
 
@@ -78,13 +79,30 @@ The plan as written had real gaps. Subagent-driven review (spec compliance + cod
 9. **`_is_running` blocked `cmd_finish`** (Task 14, surfaced by E2E run). The db service runs indefinitely (long-lived Postgres), so the original check `any(State == "running")` was always true after the agent exited. Scoped to `Service == "agent"`.
 10. **Docker CLI plugin discovery broken when `HOME` is monkeypatched** (Task 14). The `fake_creds` test fixture overrode `HOME`, which broke Docker's `~/.docker/cli-plugins/` lookup, so `docker compose` couldn't even start. Fixed by setting `DOCKER_CONFIG` to the real `~/.docker` before the HOME redirect.
 
-## Post-review hardening
+## v0.1.1 — Post-review hardening
 
 Follow-up review after `v0.1.0` found several real gaps and tightened the implementation:
 
 1. **Agent credentials no longer enter the Docker build.** The agent image is static; `repo.bundle` and `.credentials.json` are copied into the running container with `docker cp`, then removed from the host session input directory. The entrypoint waits for those files before starting Claude Code.
 2. **Custom-tagged per-session images are removed explicitly.** `finish` and `stop` now call `docker image rm -f` for the recorded agent/db image tags instead of relying on `docker compose down --rmi local`, which does not remove custom-tagged images.
 3. **Agent result metadata is consumed.** `finish` copies `/output/exit_code` and `/output/base_branch`, records them in `meta.json`, marks non-zero exits as `crashed`, and scopes `patch.diff` to the actual base branch instead of assuming `main`.
+
+## v0.2.0
+
+Four follow-ups, scoped to a coherent release:
+
+1. **Postgres dump no longer in image layers.** The db service uses upstream `postgres:16`. The CLI brings it up, waits for `pg_isready`, then `docker cp`'s the dump into the running container, runs `pg_restore`, and wipes the dump file. No per-session `sandbox-db:*` image is created. (`images/db/` deleted.)
+2. **Log follower lifecycle.** `meta.follower_pid` is now terminated by `finish`, `stop`, and the failed-start cleanup path via new `docker.terminate_pid(pid)` helper (SIGTERM → wait → SIGKILL; tolerates already-gone).
+3. **Dead `build_dir_db` field removed** from `ComposeConfig`.
+4. **CLI UX:**
+   - `sandbox list` verb prints a one-row-per-session table.
+   - `status` renders `started_at`/`finished_at` as local ISO timestamps and compose state as `service=state` pairs (instead of raw epoch and raw JSON).
+   - Three error wrappers in `cli.main`: `docker.DockerNotRunning` ("Is Docker Desktop running?"), `botocore.NoCredentialsError` ("Set AWS_ACCESS_KEY_ID..."), `LookupError` from `session.find` ("no session matching X" — no traceback).
+
+### v0.2.0 bugs caught by integration test
+
+11. **Upstream `postgres:16` needs env vars the deleted `images/db/Dockerfile` used to provide.** The integration test failed because the db container exited with "superuser password is not specified". The old custom Dockerfile set `POSTGRES_HOST_AUTH_METHOD=trust`, `POSTGRES_DB`, `POSTGRES_USER` via `ENV`. Restored these as a `compose.yml.j2` `environment:` block on the db service, with a unit test asserting both vars are rendered.
+12. **E2E "no sandbox-db image exists" assertion was too broad.** Stale `sandbox-db:*` images from v0.1.0 runs would trip the assertion even though the v0.2 run created nothing. Refined to snapshot `sandbox-db:*` image IDs before the run and assert no new ones appeared.
 
 ## Layout
 
@@ -94,8 +112,12 @@ claude-code-sandbox/
 ├── README.md
 ├── PROGRESS.md                                  (this file)
 ├── docs/superpowers/
-│   ├── specs/2026-05-21-claude-code-sandbox-design.md
-│   └── plans/2026-05-21-claude-code-sandbox.md
+│   ├── specs/
+│   │   ├── 2026-05-21-claude-code-sandbox-design.md
+│   │   └── 2026-05-23-v0.2.0-design.md
+│   └── plans/
+│       ├── 2026-05-21-claude-code-sandbox.md
+│       └── 2026-05-23-v0.2.0.md
 ├── src/sandbox/
 │   ├── cli.py
 │   ├── session.py
@@ -106,8 +128,7 @@ claude-code-sandbox/
 │   └── templates/compose.yml.j2
 ├── images/
 │   ├── agent/{Dockerfile, entrypoint.sh}
-│   ├── agent-stub/{Dockerfile, entrypoint.sh}
-│   └── db/{Dockerfile, init.sh}
+│   └── agent-stub/{Dockerfile, entrypoint.sh}
 └── tests/
     ├── conftest.py
     ├── test_session.py
@@ -122,15 +143,17 @@ claude-code-sandbox/
         └── test_isolation.py
 ```
 
-## Commit history (v0.1.0)
+## Commit history
 
-27 commits from initial spec to tag. Workflow: brainstorming → design spec → implementation plan → 16 TDD tasks (each with implementer + spec reviewer + code-quality reviewer subagents) → README + tag.
+- **v0.1.0** — 27 commits from initial spec to tag. Workflow: brainstorming → design spec → implementation plan → 16 TDD tasks (each with implementer + spec reviewer + code-quality reviewer subagents) → README + tag.
+- **v0.1.1** — 2 commits landing the post-review hardening pass (docker cp inputs, explicit image cleanup, consume exit_code/base_branch) + docs.
+- **v0.2.0** — 11 commits: design spec, plan, and 9 implementation/fix commits delivering runtime dump import, follower lifecycle, dead-field removal, CLI UX.
 
 No `Co-Authored-By` trailers per user preference.
 
-## Follow-up backlog
+## Follow-up backlog (post v0.2.0)
 
-These are the remaining items to handle after the post-review hardening pass. They are not blocking local use, but they should be addressed before presenting the sandbox as a hardened security boundary.
+Items completed in v0.2.0 (struck through). Items 1, 4, 6, 7 remain — they should be addressed before presenting the sandbox as a hardened security boundary.
 
 ### P0 — Security boundary clarity
 
@@ -139,17 +162,11 @@ These are the remaining items to handle after the post-review hardening pass. Th
    - Risk: "cannot reach host services" is not a defensible blanket claim without an explicit firewall, proxy, or network policy.
    - Follow up: decide whether the agent should use an allowlisted egress proxy, container firewall rules, or a documented weaker guarantee. Add integration tests for the chosen model.
 
-2. **Move the Postgres dump out of Docker build layers.**
-   - Current state: the dump is copied into the db image build context and baked into a custom per-session image. That image is explicitly removed on `finish` / `stop`, but the dump exists in image layers until cleanup runs.
-   - Risk: failed cleanup, daemon-layer retention, or image inspection can expose dump contents longer than intended.
-   - Follow up: copy the dump into a running db container or use an ephemeral Docker volume/import container flow, then delete host-side dump inputs after restore.
+2. ~~**Move the Postgres dump out of Docker build layers.**~~ Shipped in v0.2.0 — see "v0.2.0" section above.
 
 ### P1 — Operational reliability
 
-3. **Stop the background log follower explicitly.**
-   - Current state: `compose_logs_follow` stores `meta.follower_pid`, but there is no `compose_logs_stop` hook. The follower usually exits when Compose resources disappear, but a failed or abandoned session can leave it running.
-   - Risk: stale processes and open log followers accumulate across failed sessions.
-   - Follow up: add a small process-management helper that terminates `meta.follower_pid` during `finish`, `stop`, and failed `start` cleanup, with tests for missing/already-exited PIDs.
+3. ~~**Stop the background log follower explicitly.**~~ Shipped in v0.2.0.
 
 4. **Add a real-Claude smoke test.**
    - Current state: integration tests use `agent-stub`; the actual `claude` binary path remains manually tested.
@@ -158,17 +175,11 @@ These are the remaining items to handle after the post-review hardening pass. Th
 
 ### P2 — Cleanup and ergonomics
 
-5. **Remove dead `build_dir_db` from `ComposeConfig`.**
-   - Current state: `build_dir_db` is still passed through config, but the db service uses a prebuilt image in the rendered Compose file.
-   - Risk: small readability drag and misleading API surface.
-   - Follow up: delete the field and update tests unless the db dump import flow is redesigned to use a Compose build context again.
+5. ~~**Remove dead `build_dir_db` from `ComposeConfig`.**~~ Shipped in v0.2.0.
 
 6. **Make integration fixtures less coupled to one `tmp_path`.**
    - Current state: the fixture repo, tiny dump, and patched image tree share the same test temp root.
    - Risk: low; no observed failures, but filesystem cleanup or path collision bugs would be harder to diagnose.
    - Follow up: split fixture roots or use named subdirectories with stricter cleanup assertions.
 
-7. **Improve CLI operator output.**
-   - Current state: `status` prints raw epoch timestamps and raw Compose JSON; common failures still bubble up as Python exceptions.
-   - Risk: workable for development, rough for regular use.
-   - Follow up: add human-readable timestamps, a concise session list command, and friendly error messages for Docker, S3, Git, and credential failures.
+7. ~~**Improve CLI operator output.**~~ Shipped in v0.2.0 — `sandbox list`, human-readable timestamps, error wrappers.

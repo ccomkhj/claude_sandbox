@@ -38,6 +38,9 @@ sandbox start \
 sandbox status 01HK3P
 sandbox logs 01HK3P -f
 
+# See all sessions
+sandbox list
+
 # When it exits, pull the branch back to your local repo
 sandbox finish 01HK3P
 # → prints:  git fetch ~/.sandbox/sessions/01HK3P.../bare.git sandbox/01HK3P...
@@ -53,7 +56,7 @@ sandbox prune
 
 - **No broad host filesystem access.** Inputs are copied into containers by the CLI, not exposed through bind mounts. The repo bundle and Claude credentials are copied into the already-running agent container with `docker cp`, then deleted from the host session input directory. Outputs come back via `docker cp` of a git bundle the agent writes on exit. The rendered `compose.yml` has zero host bind-mounts (asserted in tests).
 - **Database has no public network.** The Postgres container sits on a `internal: true` Docker network — reachable by the agent at `db:5432`, but cannot exfiltrate. Verified live by the isolation integration test.
-- **Per-session ephemerality.** Each session has its own compose project, db image, and agent image. `sandbox finish` (or `sandbox stop`) tears down Compose resources and explicitly removes the custom-tagged per-session images.
+- **Per-session ephemerality.** Each session has its own compose project and agent image. The Postgres dump is `docker cp`'d into a stock `postgres:16` container at runtime and wiped immediately after restore — it never lives in an image layer. `sandbox finish` (or `sandbox stop`) tears down Compose resources, terminates the log follower, and removes the per-session agent image.
 
 The agent container intentionally keeps internet egress for Claude Code, GitHub, package registries, and similar tools. The integration test checks that `host.docker.internal` is not reachable on a common host-service path, but this is not a full outbound firewall.
 
@@ -61,7 +64,7 @@ The agent container intentionally keeps internet egress for Claude Code, GitHub,
 
 ```sh
 pip install -e '.[dev]'
-pytest                          # fast unit tests (~50 tests, < 1s)
+pytest                          # fast unit tests (~66 tests, < 1s)
 pytest --run-integration        # also runs real-Docker tests (~5-15 min first time, ~30s on cached layers)
 ```
 
