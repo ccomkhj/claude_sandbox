@@ -5,16 +5,13 @@ set -euo pipefail
 : "${BRANCH:?BRANCH env var required}"
 
 deadline=$((SECONDS + 120))
-while [[ ! -s /input/repo.bundle || ! -s /input/.credentials.json ]]; do
+while [[ ! -s /input/repo.bundle ]]; do
   if (( SECONDS >= deadline )); then
     echo "timed out waiting for sandbox inputs" >&2
     exit 2
   fi
   sleep 1
 done
-
-# Shred credentials immediately (we don't use them but the contract is symmetric with the real agent).
-shred -u /input/.credentials.json 2>/dev/null || true
 
 git clone /input/repo.bundle /work/repo
 cd /work/repo

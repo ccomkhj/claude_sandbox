@@ -10,7 +10,7 @@ from sandbox import cli, session
 
 @pytest.mark.integration
 def test_isolation_invariants(
-    docker_available, fixture_repo, tiny_dump, fake_creds, sandbox_home, monkeypatch, tmp_path, capsys
+    docker_available, fixture_repo, tiny_dump, fake_auth_env, sandbox_home, monkeypatch, tmp_path, capsys
 ):
     if not docker_available:
         pytest.skip("docker daemon not available")

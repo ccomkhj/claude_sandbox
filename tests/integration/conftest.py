@@ -1,5 +1,4 @@
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -48,13 +47,8 @@ def tiny_dump(tmp_path):
 
 
 @pytest.fixture
-def fake_creds(tmp_path, monkeypatch):
-    home = tmp_path / "fake_home"
-    (home / ".claude").mkdir(parents=True)
-    (home / ".claude" / ".credentials.json").write_text('{"placeholder": true}')
-    # Preserve the real Docker config directory so CLI plugins (docker-compose) are
-    # still discoverable after HOME is redirected to a tmp dir.
-    real_docker_config = Path.home() / ".docker"
-    monkeypatch.setenv("DOCKER_CONFIG", str(real_docker_config))
-    monkeypatch.setenv("HOME", str(home))
-    return home
+def fake_auth_env(monkeypatch):
+    """Set a dummy CLAUDE_CODE_OAUTH_TOKEN so cmd_start's auth check passes
+    without needing real credentials. The integration tests use the stub agent,
+    which doesn't actually call the Claude API, so the value doesn't matter."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "integration-test-dummy-token")
