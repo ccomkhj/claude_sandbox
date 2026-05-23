@@ -914,3 +914,42 @@ def test_start_installs_proxy_config_before_agent_inputs(sandbox_home, tmp_path,
     assert squid_idx < bundle_idx, (
         f"squid config (idx {squid_idx}) must be cp'd before repo.bundle (idx {bundle_idx})"
     )
+
+
+def test_resolve_host_auth_returns_oauth_token_when_set(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oauth-fake-123")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    name, value = cli._resolve_host_auth()
+    assert name == "CLAUDE_CODE_OAUTH_TOKEN"
+    assert value == "sk-ant-oauth-fake-123"
+
+
+def test_resolve_host_auth_prefers_oauth_token_over_api_key(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-99")
+    name, value = cli._resolve_host_auth()
+    assert name == "CLAUDE_CODE_OAUTH_TOKEN"
+    assert value == "oauth-tok"
+
+
+def test_resolve_host_auth_falls_back_to_api_key(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-77")
+    name, value = cli._resolve_host_auth()
+    assert name == "ANTHROPIC_API_KEY"
+    assert value == "sk-ant-api-77"
+
+
+def test_resolve_host_auth_treats_empty_string_as_unset(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-1")
+    name, value = cli._resolve_host_auth()
+    # Empty CLAUDE_CODE_OAUTH_TOKEN should be ignored; fall through to API key
+    assert name == "ANTHROPIC_API_KEY"
+
+
+def test_resolve_host_auth_raises_when_neither_set(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(cli.HostAuthMissing, match="claude setup-token"):
+        cli._resolve_host_auth()

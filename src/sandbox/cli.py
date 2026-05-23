@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json as _json
+import os
 import shutil
 import sys
 import time as _time
@@ -37,6 +38,30 @@ EGRESS_ALLOWLIST_GROUPS["default"] = tuple(
     for group in ("anthropic", "github", "python", "node")
     for fqdn in EGRESS_ALLOWLIST_GROUPS[group]
 )
+
+
+class HostAuthMissing(RuntimeError):
+    """Raised when no usable Claude credentials are available in host env."""
+
+
+def _resolve_host_auth() -> tuple[str, str]:
+    """Return (env_var_name, token_value) for the agent container.
+
+    Prefers CLAUDE_CODE_OAUTH_TOKEN (Claude subscription via `claude setup-token`).
+    Falls back to ANTHROPIC_API_KEY (pay-per-token API billing).
+    Raises HostAuthMissing if neither is set.
+    """
+    oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    if oauth:
+        return ("CLAUDE_CODE_OAUTH_TOKEN", oauth)
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if api_key:
+        return ("ANTHROPIC_API_KEY", api_key)
+    raise HostAuthMissing(
+        "No Claude credentials found in env. Run `claude setup-token` on the host "
+        "to mint a subscription token, then `export CLAUDE_CODE_OAUTH_TOKEN=...`. "
+        "Or set ANTHROPIC_API_KEY for pay-per-token API billing."
+    )
 
 
 def _agent_image_tag(base: str, sid: str) -> str:
