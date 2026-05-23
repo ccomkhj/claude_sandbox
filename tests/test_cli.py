@@ -572,3 +572,85 @@ def test_prune_removes_old_finished_sessions(sandbox_home):
     assert rc == 0
     assert not session.session_dir(m.id).exists()
     assert session.session_dir(fresh.id).exists()
+
+
+def test_finish_terminates_follower(sandbox_home, tmp_path, monkeypatch):
+    import subprocess
+
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    m.follower_pid = 9999
+    session.save(m)
+    sdir = session.session_dir(m.id)
+    from sandbox import repo
+    repo.init_bare_repo(sdir / "bare.git")
+
+    # Build a valid output bundle (mirrors test_finish_imports_branch_into_bare)
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(["git", "-C", str(work), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
+    (work / "f").write_text("f")
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "init"], check=True)
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", m.branch], check=True)
+    (work / "g").write_text("g")
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "change"], check=True)
+    bundle_src = tmp_path / "branch.bundle"
+    subprocess.run(["git", "-C", str(work), "bundle", "create", str(bundle_src), "main", m.branch], check=True)
+
+    def fake_cp(*, src, dst):
+        if "branch.bundle" in str(src):
+            import shutil as _sh
+            _sh.copy(bundle_src, dst)
+    monkeypatch.setattr(cli.docker, "cp", fake_cp)
+    monkeypatch.setattr(cli.docker, "compose_ps", lambda **kw: MagicMock(stdout="[]"))
+    monkeypatch.setattr(cli.docker, "compose_down", MagicMock())
+    monkeypatch.setattr(cli.docker, "remove_images", MagicMock())
+
+    terminate_calls = []
+    monkeypatch.setattr(cli.docker, "terminate_pid", lambda pid, **kw: terminate_calls.append(pid))
+
+    rc = cli.main(["finish", m.id])
+    assert rc == 0
+    assert terminate_calls == [9999]
+
+
+def test_stop_terminates_follower(sandbox_home, monkeypatch):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    m.follower_pid = 1234
+    session.save(m)
+
+    monkeypatch.setattr(cli.docker, "compose_kill", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_down", MagicMock())
+    monkeypatch.setattr(cli.docker, "remove_images", MagicMock())
+    monkeypatch.setattr(cli, "_wait_until_stopped", lambda **kw: True)
+
+    terminate_calls = []
+    monkeypatch.setattr(cli.docker, "terminate_pid", lambda pid, **kw: terminate_calls.append(pid))
+
+    rc = cli.main(["stop", m.id])
+    assert rc == 0
+    assert terminate_calls == [1234]
+
+
+def test_follower_termination_tolerates_missing_pid(sandbox_home, monkeypatch):
+    m = session.new_session(goal="g", repo="/tmp/r")
+    m.status = "running"
+    m.follower_pid = None  # never started
+    session.save(m)
+
+    monkeypatch.setattr(cli.docker, "compose_kill", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_down", MagicMock())
+    monkeypatch.setattr(cli.docker, "remove_images", MagicMock())
+    monkeypatch.setattr(cli, "_wait_until_stopped", lambda **kw: True)
+
+    terminate_calls = []
+    monkeypatch.setattr(cli.docker, "terminate_pid", lambda pid, **kw: terminate_calls.append(pid))
+
+    rc = cli.main(["stop", m.id])
+    assert rc == 0
+    assert terminate_calls == []  # nothing to terminate

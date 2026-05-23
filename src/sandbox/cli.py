@@ -41,6 +41,14 @@ def _cleanup_session_images(meta: session.Meta) -> None:
             pass
 
 
+def _terminate_follower(meta: session.Meta) -> None:
+    if meta.follower_pid:
+        try:
+            docker.terminate_pid(meta.follower_pid)
+        except Exception:
+            pass
+
+
 def _wait_for_db_ready(*, container: str, db_name: str, timeout_s: float = 60.0) -> None:
     deadline = _time.time() + timeout_s
     last_err = None
@@ -144,6 +152,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         _cleanup_sensitive_build_inputs(session.session_dir(meta.id))
         _cleanup_compose_project(meta)
         _cleanup_session_images(meta)
+        _terminate_follower(meta)
         try:
             meta.status = "failed"
             meta.finished_at = _time.time()
@@ -318,6 +327,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
 
     # Tear down compose resources, then explicitly remove custom-tagged images.
     docker.compose_down(project=project, compose_file=compose_file, volumes=True, rmi_local=True)
+    _terminate_follower(meta)
     _cleanup_session_images(meta)
 
     meta.status = "finished" if exit_code == 0 else "crashed"
@@ -385,6 +395,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
         except Exception:
             pass
     docker.compose_down(project=project, compose_file=compose_file, volumes=True, rmi_local=True)
+    _terminate_follower(meta)
     _cleanup_session_images(meta)
     meta.status = "stopped"
     meta.finished_at = _time.time()
