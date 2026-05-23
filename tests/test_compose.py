@@ -71,3 +71,12 @@ def test_missing_template_field_raises_strict_undefined():
     tpl = _env.from_string("hello {{ nonexistent_field }}")
     with pytest.raises(jinja2.UndefinedError):
         tpl.render()
+
+
+def test_db_service_has_postgres_env():
+    parsed = yaml.safe_load(render(cfg(db_name="appdb")))
+    env = parsed["services"]["db"]["environment"]
+    # postgres:16 refuses to start without one of these
+    assert env.get("POSTGRES_HOST_AUTH_METHOD") == "trust"
+    # initdb only creates appdb if POSTGRES_DB is set
+    assert env.get("POSTGRES_DB") == "appdb"
