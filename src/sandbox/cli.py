@@ -324,10 +324,27 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
         _wait_for_db_ready(container=db_container, db_name=args.db_name)
         _import_dump_at_runtime(container=db_container, local_dump=local_dump, db_name=args.db_name)
 
-        # 10. Hand repo bundle + creds to running agent container
+        # 10. Hand repo bundle + creds to running agent container.
+        # `docker cp` lands files owned by root:root inside the container, but the
+        # agent process runs as the unprivileged `node` user (required because
+        # claude --dangerously-skip-permissions refuses to run as root). Chown
+        # the files after the copy so the entrypoint can read them.
         container = docker.container_name(project=project, service="agent")
         docker.cp(src=str(input_dir / "repo.bundle"), dst=f"{container}:/input/repo.bundle")
         docker.cp(src=str(input_dir / ".credentials.json"), dst=f"{container}:/input/.credentials.json")
+        # `docker cp` lands files as root:root inside the container. The real
+        # agent image runs as the unprivileged `node` user (claude
+        # --dangerously-skip-permissions refuses to run as root), so we need
+        # to chown the inputs to node. The stub image runs as root and has no
+        # `node` user — best-effort the chown so the stub path still works.
+        try:
+            docker.exec_in_container(
+                container=container,
+                cmd=["chown", "node:node", "/input/repo.bundle", "/input/.credentials.json"],
+                user="root",
+            )
+        except Exception:
+            pass
     finally:
         _cleanup_sensitive_build_inputs(sdir)
 

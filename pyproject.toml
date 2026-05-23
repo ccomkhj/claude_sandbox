@@ -30,5 +30,6 @@ packages = ["src/sandbox"]
 testpaths = ["tests"]
 markers = [
     "integration: requires Docker daemon; opt in with --run-integration",
+    "smoke: opt-in real-Claude smoke test, requires ANTHROPIC_API_KEY or ~/.claude/.credentials.json",
 ]
 addopts = "-ra"

@@ -8,15 +8,25 @@ def pytest_addoption(parser):
         default=False,
         help="run integration tests that need a real Docker daemon",
     )
+    parser.addoption(
+        "--run-smoke",
+        action="store_true",
+        default=False,
+        help="run smoke tests that hit the real Claude API (requires ANTHROPIC_API_KEY or ~/.claude/.credentials.json)",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-integration"):
-        return
-    skip_marker = pytest.mark.skip(reason="needs --run-integration")
-    for item in items:
-        if "integration" in item.keywords:
-            item.add_marker(skip_marker)
+    if not config.getoption("--run-integration"):
+        skip_integration = pytest.mark.skip(reason="needs --run-integration")
+        for item in items:
+            if "integration" in item.keywords:
+                item.add_marker(skip_integration)
+    if not config.getoption("--run-smoke"):
+        skip_smoke = pytest.mark.skip(reason="needs --run-smoke")
+        for item in items:
+            if "smoke" in item.keywords:
+                item.add_marker(skip_smoke)
 
 
 @pytest.fixture

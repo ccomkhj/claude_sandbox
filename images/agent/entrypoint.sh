@@ -14,9 +14,9 @@ while [[ ! -s /input/repo.bundle || ! -s /input/.credentials.json ]]; do
 done
 
 # Install creds into the location claude expects, then shred original.
-mkdir -p /root/.claude
-cp /input/.credentials.json /root/.claude/.credentials.json
-chmod 600 /root/.claude/.credentials.json
+mkdir -p "$HOME/.claude"
+cp /input/.credentials.json "$HOME/.claude/.credentials.json"
+chmod 600 "$HOME/.claude/.credentials.json"
 shred -u /input/.credentials.json
 
 # Clone repo bundle and check out the agent's branch.

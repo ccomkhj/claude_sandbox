@@ -92,8 +92,11 @@ def container_name(*, project: str, service: str, index: int = 1) -> str:
     return f"{project}-{service}-{index}"
 
 
-def exec_in_container(*, container: str, cmd: list[str]) -> subprocess.CompletedProcess:
-    return _run(["docker", "exec", container, *cmd])
+def exec_in_container(
+    *, container: str, cmd: list[str], user: str | None = None
+) -> subprocess.CompletedProcess:
+    extra = ["--user", user] if user else []
+    return _run(["docker", "exec", *extra, container, *cmd])
 
 
 def terminate_pid(pid: int, timeout_s: float = 5.0) -> None:
