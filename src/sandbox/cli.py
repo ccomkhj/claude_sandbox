@@ -16,10 +16,11 @@ EGRESS_ALLOWLIST_GROUPS: dict[str, tuple[str, ...]] = {
         "console.anthropic.com",
     ),
     "github": (
-        "github.com",
+        # .github.com covers github.com and all subdomains (api.github.com etc.)
+        # Squid 6 rejects redundant subdomain entries in the same ACL, so we
+        # use only the wildcard forms here.
         ".github.com",
         ".githubusercontent.com",
-        "api.github.com",
     ),
     "python": (
         "pypi.org",
@@ -27,7 +28,7 @@ EGRESS_ALLOWLIST_GROUPS: dict[str, tuple[str, ...]] = {
         "pythonhosted.org",
     ),
     "node": (
-        "registry.npmjs.org",
+        # .npmjs.org covers registry.npmjs.org and all subdomains.
         ".npmjs.org",
     ),
 }

@@ -10,10 +10,14 @@ done
 echo "[sandbox-proxy] config detected; starting squid" >&2
 
 # The ubuntu/squid image's actual startup script varies between versions.
-# Try the most common upstream entrypoint paths; fall back to direct squid.
-if [ -x /usr/sbin/entrypoint.sh ]; then
-    exec /usr/sbin/entrypoint.sh "$@"
+# When delegating to the upstream entrypoint, pass the standard squid args
+# so the real squid process starts (not just the -Nz cache-init run).
+# Fallback: start squid directly in foreground mode.
+if [ -x /usr/local/bin/entrypoint.sh ]; then
+    exec /usr/local/bin/entrypoint.sh -f /etc/squid/squid.conf -NYC
+elif [ -x /usr/sbin/entrypoint.sh ]; then
+    exec /usr/sbin/entrypoint.sh -f /etc/squid/squid.conf -NYC
 elif [ -x /entrypoint.sh ]; then
-    exec /entrypoint.sh "$@"
+    exec /entrypoint.sh -f /etc/squid/squid.conf -NYC
 fi
 exec squid -N -f /etc/squid/squid.conf

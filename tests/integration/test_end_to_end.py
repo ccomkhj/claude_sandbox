@@ -23,6 +23,11 @@ def test_end_to_end_with_stub_agent(
     (images_patched / "agent").mkdir(parents=True)
     _sh.copy(images_real / "agent-stub" / "Dockerfile", images_patched / "agent" / "Dockerfile")
     _sh.copy(images_real / "agent-stub" / "entrypoint.sh", images_patched / "agent" / "entrypoint.sh")
+
+    # v0.3.0: CLI now builds the proxy image from images/proxy — copy it into the
+    # patched images root so the monkeypatched _images_root() resolves it correctly.
+    _sh.copytree(images_real / "proxy", images_patched / "proxy")
+
     monkeypatch.setattr(cli, "_images_root", lambda: images_patched)
 
     # Mock S3 fetch to return the local tiny.dump

@@ -5,7 +5,7 @@ services:
     image: {{ proxy_image }}
     networks: [agent_net, proxy_egress_net]
     healthcheck:
-      test: ["CMD-SHELL", "squidclient -h 127.0.0.1 cache_object://localhost/info >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/3128' 2>/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 30

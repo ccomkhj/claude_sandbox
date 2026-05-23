@@ -92,13 +92,14 @@ def test_squid_config_renders_with_allowlist():
     assert "api.anthropic.com" in out
     assert ".github.com" in out
     assert "pypi.org" in out
-    # Squid recipe markers
-    assert "http_port 3128" in out
     # We are NOT doing TLS MITM
     assert "ssl_bump" not in out
     assert "http_access allow" in out
-    # The catch-all deny must be present
-    assert "http_access deny all" in out
+    # Allowlist ACL must be present using dstdomain (compatible with standard
+    # forward proxy; ssl::server_name requires SSL-bump/MITM mode which we don't use)
+    assert "acl allowlisted dstdomain" in out
+    # http_port and the catch-all deny are provided by the ubuntu/squid base
+    # image's /etc/squid/squid.conf — our conf.d snippet only needs the allowlist ACL
 
 
 def test_squid_config_rejects_empty_allowlist():

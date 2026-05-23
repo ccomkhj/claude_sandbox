@@ -782,15 +782,18 @@ def test_main_translates_session_not_found_to_friendly_error(sandbox_home, capsy
 def test_resolve_allowlist_with_default_group():
     fqdns = cli._resolve_allowlist(groups="default", extra="")
     assert "api.anthropic.com" in fqdns
-    assert "github.com" in fqdns
+    # github group uses .github.com (wildcard) instead of bare github.com to
+    # avoid Squid 6 rejecting redundant subdomain entries in the same ACL
+    assert ".github.com" in fqdns
     assert "pypi.org" in fqdns
-    assert "registry.npmjs.org" in fqdns
+    # node group uses .npmjs.org (wildcard) instead of registry.npmjs.org
+    assert ".npmjs.org" in fqdns
 
 
 def test_resolve_allowlist_with_subset_of_groups():
     fqdns = cli._resolve_allowlist(groups="anthropic,github", extra="")
     assert "api.anthropic.com" in fqdns
-    assert "github.com" in fqdns
+    assert ".github.com" in fqdns
     assert "pypi.org" not in fqdns
     assert "registry.npmjs.org" not in fqdns
 
@@ -816,7 +819,7 @@ def test_resolve_allowlist_handles_empty_groups_and_extras():
     # Empty strings between commas, leading/trailing whitespace
     fqdns = cli._resolve_allowlist(groups="anthropic, , github", extra=" data.example.com, ")
     assert "api.anthropic.com" in fqdns
-    assert "github.com" in fqdns
+    assert ".github.com" in fqdns
     assert "data.example.com" in fqdns
 
 

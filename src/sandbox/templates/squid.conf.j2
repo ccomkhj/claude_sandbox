@@ -1,27 +1,20 @@
 # Per-session Squid config rendered by sandbox-cli.
-# Listens on 3128; allowlist enforced via SNI on CONNECT for HTTPS, dstdomain for HTTP.
-
-http_port 3128
-
-acl SSL_ports port 443
-acl Safe_ports port 80
-acl Safe_ports port 443
-acl CONNECT method CONNECT
-
-http_access deny CONNECT !SSL_ports
-http_access deny !Safe_ports
+# Injected into conf.d, included by the main squid.conf before "http_access deny all".
+# Standard forward proxy (no SSL-bump): allowlist enforced via dstdomain on
+# CONNECT for HTTPS and on plain HTTP.
+# NOTE: http_port, SSL_ports, Safe_ports, CONNECT acls, and the catch-all deny
+# are all already present in /etc/squid/squid.conf (ubuntu/squid base image).
+# We only need the per-session allowlist ACL and its access rules here.
 
 {% for fqdn in allowlist_fqdns %}
-acl allowlisted_ssl ssl::server_name {{ fqdn }}
-acl allowlisted_http dstdomain {{ fqdn }}
+acl allowlisted dstdomain {{ fqdn }}
 {% endfor %}
 
-http_access allow CONNECT allowlisted_ssl
-http_access allow allowlisted_http
+http_access allow CONNECT allowlisted
+http_access allow allowlisted
 
+# Deny everything else. This must be the LAST rule in this file — the
+# conf.d/ files are processed alphabetically: allowlist.conf < debian.conf.
+# Without this deny, debian.conf's "http_access allow localnet" would let the
+# agent reach any host if its source IP falls in the 192.168/172.16 ranges.
 http_access deny all
-
-cache_log /dev/stderr
-access_log stdio:/dev/stdout squid
-
-cache deny all
