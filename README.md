@@ -1,85 +1,78 @@
 # claude-code-sandbox
 
-Run Claude Code in an isolated Docker sandbox against a production Postgres dump.
+Run Claude Code on production-data tasks without giving the agent your host machine or your real database.
 
-The agent gets a fresh Postgres restored from S3, a copy of your repo on its own branch, and a Claude Code installation with your existing credentials — all without bind-mounting your host repo or credential directory. Long-running goal-mode tasks run detached; you retrieve the agent's branch when it's done.
+## Why
 
-## Prerequisites
+Long-running, autonomous Claude Code goals — refactors, migrations, debugging — usually need a copy of production data to be useful. But running an agent against your live Postgres is reckless, and running it on your laptop gives it your filesystem, your SSH keys, and your whole machine. This repo spawns a per-task sandbox: fresh Postgres from an S3 dump, isolated FS, allowlisted internet egress, and the agent's work returned as a reviewable git branch.
 
-- Docker Desktop, or any Docker daemon with `docker compose` v2
-- Python 3.11+
-- Claude auth — **one of**:
-  - **Recommended (subscription billing).** Run `claude setup-token` once on your host to mint a long-lived OAuth token from your Pro/Max/Team subscription. Then `export CLAUDE_CODE_OAUTH_TOKEN=<value>` in the shell where you run `sandbox`. The agent inside the sandbox picks up the token from env and authenticates against your subscription quota — no per-token API charges.
-  - **Fallback (pay-per-token API billing).** Set `ANTHROPIC_API_KEY` in env. Used only if `CLAUDE_CODE_OAUTH_TOKEN` is unset.
-- AWS credentials with read access to the dump bucket
+## How it works
+
+Each `sandbox start` is one Docker Compose project with three services on three networks:
+
+```
+                        agent_net (internal — no direct egress)
+                        ┌────────────────────────────────────────┐
+                        │  agent  ────►  proxy (Squid allowlist) │
+                        └──────┬───────────────────┬─────────────┘
+                          db_net (internal)   proxy_egress_net (internet)
+                               ┌──┴─────┐
+                               │   db   │   ◄── S3 dump cp'd in at runtime
+                               └────────┘
+```
+
+The CLI on the host assembles each session: pulls the Postgres dump from S3, copies it into a stock `postgres:16` container and runs `pg_restore` (the dump never lives in an image layer), bundles your repo and `docker cp`s it in, renders a per-session Squid allowlist, then starts the agent detached. The agent works on a `sandbox/<id>` branch, you `git fetch` it back when it's done. Containers never bind-mount host paths; auth flows in as a single env var.
+
+## Features
+
+- **Long-running detached sessions.** Kick off, walk away, retrieve when done. ULID session ids; multiple concurrent sessions.
+- **Claude subscription auth.** `claude setup-token` once on your host, export `CLAUDE_CODE_OAUTH_TOKEN`, use your Pro/Max/Team quota — no per-token API charges. `ANTHROPIC_API_KEY` falls back to API billing.
+- **Production Postgres dump from S3, runtime-restored.** Bucket-aware ETag cache; dump file lives only inside the running db container's overlay and is wiped post-restore.
+- **Allowlisted egress.** Agent reaches only Anthropic, GitHub, PyPI, and npm by default. Customize with `--egress-allowlist anthropic,github` or `--extra-egress-allowlist data.example.com`. Everything else gets a 403 from the Squid proxy.
+- **Repo round-trip via git bundle.** Host repo → bundle → cloned in container → agent edits → bundle out → host-side bare repo + `patch.diff`. No bind-mount of your working tree.
+- **Per-session ephemerality.** `sandbox finish` (or `stop`) tears down Compose, terminates the log follower, and removes the per-session agent image. `sandbox prune` cleans state dirs after 30 days.
 
 ## Install
 
 ```sh
-git clone <this repo>
-cd claude-code-sandbox
+git clone https://github.com/ccomkhj/claude_sandbox.git
+cd claude_sandbox
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
 
-This installs the `sandbox` CLI on your PATH.
+Requires Docker (with `compose` v2), Python 3.11+, and AWS credentials for the dump bucket.
 
 ## Use
 
 ```sh
-# Kick off a long-running goal task
-sandbox start \
-  --repo ~/code/my-app \
-  --goal "refactor X to use the new payments module" \
-  --dump-bucket my-dumps \
-  --dump-key prod/latest.dump \
-  --db-name appdb
-# → prints session id, e.g. 01HK3P0000000000000000
+# One-time host setup: mint a subscription-billed token
+claude setup-token
+export CLAUDE_CODE_OAUTH_TOKEN=<value-from-setup-token>
 
-# Restrict egress (default: anthropic + github + python + node)
-sandbox start \
-  --repo ~/code/my-app \
-  --goal "..." \
-  --dump-bucket my-dumps --dump-key prod/latest.dump \
-  --egress-allowlist anthropic,github \
-  --extra-egress-allowlist data.example.com
+# Kick off a session
+sandbox start --repo ~/code/my-app --goal "refactor X to use the new payments module" \
+  --dump-bucket my-dumps --dump-key prod/latest.dump
 
-# Check on it
-sandbox status 01HK3P
-sandbox logs 01HK3P -f
-
-# See all sessions
-sandbox list
-
-# When it exits, pull the branch back to your local repo
-sandbox finish 01HK3P
-# → prints:  git fetch ~/.sandbox/sessions/01HK3P.../bare.git sandbox/01HK3P...
-
-# Force-stop one that's stuck
-sandbox stop 01HK3P
-
-# Clean up sessions older than 30 days
-sandbox prune
+# Manage running sessions
+sandbox list                    # all sessions
+sandbox status <id>             # snapshot of one
+sandbox logs <id> -f            # tail logs
+sandbox finish <id>             # pull branch back as a patch
+sandbox stop <id>               # force-stop a stuck session
+sandbox prune                   # drop finished sessions >30 days old
 ```
-
-## What's isolated
-
-- **No broad host filesystem access.** Inputs are copied into containers by the CLI, not exposed through bind mounts. The repo bundle is copied into the already-running agent container with `docker cp`, then deleted from the host session input directory. The Claude auth token enters as a container environment variable (set per-session by the CLI from your host's `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`) — your host `~/.claude/` directory is never read or copied. Outputs come back via `docker cp` of a git bundle the agent writes on exit. The rendered `compose.yml` has zero host bind-mounts (asserted in tests).
-- **Database has no public network.** The Postgres container sits on a `internal: true` Docker network — reachable by the agent at `db:5432`, but cannot exfiltrate. Verified live by the isolation integration test.
-- **Per-session ephemerality.** Each session has its own compose project and agent image. The Postgres dump is `docker cp`'d into a stock `postgres:16` container at runtime and wiped immediately after restore — it never lives in an image layer. `sandbox finish` (or `sandbox stop`) tears down Compose resources, terminates the log follower, and removes the per-session agent image.
-- **Allowlisted egress through a per-session proxy (v0.3.0).** The agent network is `internal: true` — the agent has **no direct path to the public internet**. Egress flows through a per-session Squid proxy on its own bridge network; only FQDNs on the rendered allowlist are reachable. The default allowlist covers Anthropic API, GitHub, PyPI, and npm. Customize with `--egress-allowlist anthropic,github` (subsetting) or `--extra-egress-allowlist data.example.com,assets.example.com` (one-off additions). Verified live by the isolation integration test: allowlisted hosts reachable, `example.com` returns Squid's 403.
 
 ## Testing
 
 ```sh
 pip install -e '.[dev]'
-pytest                          # fast unit tests (~90 tests, < 1s)
-pytest --run-integration        # also runs real-Docker tests (~5-15 min first time, ~45s on cached layers)
-pytest --run-smoke              # also exercises the real `claude` binary; needs ANTHROPIC_API_KEY
-                                # (or a fresh ~/.claude/.credentials.json on Linux)
+pytest                          # ~90 unit tests, <1s
+pytest --run-integration        # +2 real-Docker tests, ~45s on cached layers
+pytest --run-smoke              # +1 real-Claude smoke (needs CLAUDE_CODE_OAUTH_TOKEN)
 ```
 
 ## Design
 
-Full design doc: `docs/superpowers/specs/2026-05-21-claude-code-sandbox-design.md`.
-Implementation plan: `docs/superpowers/plans/2026-05-21-claude-code-sandbox.md`.
+- Specs and plans: `docs/superpowers/specs/`, `docs/superpowers/plans/`
+- Release notes and decisions: `PROGRESS.md`
