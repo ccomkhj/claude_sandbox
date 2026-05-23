@@ -8,7 +8,9 @@ The agent gets a fresh Postgres restored from S3, a copy of your repo on its own
 
 - Docker Desktop, or any Docker daemon with `docker compose` v2
 - Python 3.11+
-- A Claude Code login on the host (`claude login`) so `~/.claude/.credentials.json` exists
+- Claude auth — **one of**:
+  - **Recommended (subscription billing).** Run `claude setup-token` once on your host to mint a long-lived OAuth token from your Pro/Max/Team subscription. Then `export CLAUDE_CODE_OAUTH_TOKEN=<value>` in the shell where you run `sandbox`. The agent inside the sandbox picks up the token from env and authenticates against your subscription quota — no per-token API charges.
+  - **Fallback (pay-per-token API billing).** Set `ANTHROPIC_API_KEY` in env. Used only if `CLAUDE_CODE_OAUTH_TOKEN` is unset.
 - AWS credentials with read access to the dump bucket
 
 ## Install
@@ -62,7 +64,7 @@ sandbox prune
 
 ## What's isolated
 
-- **No broad host filesystem access.** Inputs are copied into containers by the CLI, not exposed through bind mounts. The repo bundle and Claude credentials are copied into the already-running agent container with `docker cp`, then deleted from the host session input directory. Outputs come back via `docker cp` of a git bundle the agent writes on exit. The rendered `compose.yml` has zero host bind-mounts (asserted in tests).
+- **No broad host filesystem access.** Inputs are copied into containers by the CLI, not exposed through bind mounts. The repo bundle is copied into the already-running agent container with `docker cp`, then deleted from the host session input directory. The Claude auth token enters as a container environment variable (set per-session by the CLI from your host's `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`) — your host `~/.claude/` directory is never read or copied. Outputs come back via `docker cp` of a git bundle the agent writes on exit. The rendered `compose.yml` has zero host bind-mounts (asserted in tests).
 - **Database has no public network.** The Postgres container sits on a `internal: true` Docker network — reachable by the agent at `db:5432`, but cannot exfiltrate. Verified live by the isolation integration test.
 - **Per-session ephemerality.** Each session has its own compose project and agent image. The Postgres dump is `docker cp`'d into a stock `postgres:16` container at runtime and wiped immediately after restore — it never lives in an image layer. `sandbox finish` (or `sandbox stop`) tears down Compose resources, terminates the log follower, and removes the per-session agent image.
 - **Allowlisted egress through a per-session proxy (v0.3.0).** The agent network is `internal: true` — the agent has **no direct path to the public internet**. Egress flows through a per-session Squid proxy on its own bridge network; only FQDNs on the rendered allowlist are reachable. The default allowlist covers Anthropic API, GitHub, PyPI, and npm. Customize with `--egress-allowlist anthropic,github` (subsetting) or `--extra-egress-allowlist data.example.com,assets.example.com` (one-off additions). Verified live by the isolation integration test: allowlisted hosts reachable, `example.com` returns Squid's 403.
@@ -71,7 +73,7 @@ sandbox prune
 
 ```sh
 pip install -e '.[dev]'
-pytest                          # fast unit tests (~82 tests, < 1s)
+pytest                          # fast unit tests (~90 tests, < 1s)
 pytest --run-integration        # also runs real-Docker tests (~5-15 min first time, ~45s on cached layers)
 pytest --run-smoke              # also exercises the real `claude` binary; needs ANTHROPIC_API_KEY
                                 # (or a fresh ~/.claude/.credentials.json on Linux)

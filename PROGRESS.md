@@ -1,6 +1,6 @@
-# Progress — claude-code-sandbox v0.3.0
+# Progress — claude-code-sandbox v0.4.0
 
-**Status:** v0.3.0 shipped. Tag `v0.3.0` on `main`.
+**Status:** v0.4.0 shipped. Tag `v0.4.0` on `main`.
 
 `claude-code-sandbox` runs Claude Code in an isolated Docker sandbox against a production Postgres dump. The agent gets a fresh DB from S3, a copy of your repo on its own branch, and your existing Claude Code credentials without bind-mounting your host repo or credential directory. Long-running goal-mode tasks run detached; you retrieve the agent's branch when it's done.
 
@@ -46,7 +46,7 @@ The design's promised invariants are checked by live integration tests against a
 ## Test status
 
 ```
-82 unit tests + 2 integration tests passing; 1 opt-in smoke test (real Claude API).
+90 unit tests + 2 integration tests passing; 1 opt-in smoke test (real Claude API).
 pytest                          # unit tests, < 1s
 pytest --run-integration        # also runs real-Docker tests, ~45s on cached layers
 pytest --run-smoke              # also exercises the real `claude` binary; needs ANTHROPIC_API_KEY
@@ -133,9 +133,21 @@ The opt-in smoke test surfaced two more:
 21. **Agent container was running as root.** `claude --dangerously-skip-permissions` refuses to run with root privileges, so the real-Claude path crashed on startup even though the stub integration test (which doesn't run `claude`) passed cleanly. Switched the agent image to a `USER node` setup and chowned the input/output dirs.
 22. **`docker cp` lands files as root:root in the container**, but the agent now runs as `node` — the credentials file became unreadable. Added a post-cp `docker exec --user root chown -R node:node /input` step inside `_start_session`. (`docker.exec_in_container` gained an optional `user` kwarg to support this.)
 
-### v0.3.0 known limitation
+### v0.3.0 known limitation (resolved in v0.4.0)
 
-**macOS Claude CLI uses Keychain, not `.credentials.json`.** The smoke test fixture copies `~/.claude/.credentials.json` into the container, but on macOS the live OAuth state actually lives in the Keychain; the file on disk is a stale OAuth-token snapshot that's typically expired. Workarounds: set `ANTHROPIC_API_KEY` in env, or run from a Linux host. A future release should capture the live token via the host `claude` CLI before launch (or document the env-var path as primary on macOS).
+~~macOS Claude CLI uses Keychain, not `.credentials.json`.~~ Resolved: v0.4.0 stopped reading `~/.claude/.credentials.json` at all and switched to `CLAUDE_CODE_OAUTH_TOKEN` (and `ANTHROPIC_API_KEY` fallback) from the host's environment. See v0.4.0 section.
+
+## v0.4.0
+
+One coherent change: Claude auth flows through env vars, not through a copied `~/.claude/.credentials.json`. This fixes the macOS Keychain mismatch from v0.3.0 and aligns with how Claude Code itself ships subscription auth for headless usage.
+
+1. **Subscription auth is the primary path.** Operators run `claude setup-token` once on the host to mint a long-lived OAuth token from any Claude Pro/Max/Team subscription. The CLI reads `CLAUDE_CODE_OAUTH_TOKEN` from host env and renders it into the agent service's `environment:` block in the per-session `compose.yml`. The agent's `claude` binary picks it up and authenticates against the subscription quota — no per-token API charges.
+2. **`ANTHROPIC_API_KEY` remains as a fallback** for API-billed accounts. `_resolve_host_auth` prefers `CLAUDE_CODE_OAUTH_TOKEN` and falls back to the API key if only that is set.
+3. **`~/.claude/.credentials.json` is no longer shipped into the sandbox.** The agent image dropped the cred-copy/shred logic in its entrypoint. `_start_session` no longer copies the file. `_cleanup_sensitive_build_inputs` no longer references it.
+4. **Friendly error when neither env var is set**, naming `claude setup-token` as the remediation. Exit code 2 (same as the old creds-missing path).
+5. **Test fixtures simplified:** `fake_auth_env` replaces `fake_creds` (just `monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", ...)`); `smoke_creds` checks env directly with no HOME or file manipulation.
+
+`agent-stub`'s entrypoint was also updated to no longer wait for `.credentials.json` (caught by the integration test when it timed out post-Task-3 — same input contract for both real and stub agents).
 
 ## Layout
 
@@ -148,11 +160,13 @@ claude-code-sandbox/
 │   ├── specs/
 │   │   ├── 2026-05-21-claude-code-sandbox-design.md
 │   │   ├── 2026-05-23-v0.2.0-design.md
-│   │   └── 2026-05-23-v0.3.0-design.md
+│   │   ├── 2026-05-23-v0.3.0-design.md
+│   │   └── 2026-05-23-v0.4.0-design.md
 │   └── plans/
 │       ├── 2026-05-21-claude-code-sandbox.md
 │       ├── 2026-05-23-v0.2.0.md
-│       └── 2026-05-23-v0.3.0.md
+│       ├── 2026-05-23-v0.3.0.md
+│       └── 2026-05-23-v0.4.0.md
 ├── src/sandbox/
 │   ├── cli.py
 │   ├── session.py
@@ -190,12 +204,13 @@ claude-code-sandbox/
 - **v0.1.1** — 2 commits landing the post-review hardening pass (docker cp inputs, explicit image cleanup, consume exit_code/base_branch) + docs.
 - **v0.2.0** — 11 commits: design spec, plan, and 9 implementation/fix commits delivering runtime dump import, follower lifecycle, dead-field removal, CLI UX.
 - **v0.3.0** — 9 commits: design spec, plan, and 7 implementation/fix commits delivering Squid allowlist proxy, real-Claude smoke test, integration fixture cleanup. Integration test alone caught 8 real Squid/Docker bugs; smoke test caught 2 more (agent running as root, docker-cp file ownership).
+- **v0.4.0** — 7 commits: design spec, plan, and 5 implementation commits switching from `~/.claude/.credentials.json` copy to `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) env. Subscription auth via `claude setup-token` now works cleanly on macOS where Keychain previously broke the credentials-file path.
 
 No `Co-Authored-By` trailers per user preference.
 
-## Follow-up backlog (post v0.3.0)
+## Follow-up backlog (post v0.4.0)
 
-Items completed in v0.2.0 / v0.3.0 (struck through). Items 6 and the new macOS-Keychain item remain.
+Items completed in v0.2.0 / v0.3.0 / v0.4.0 (struck through). Only one item remains.
 
 ### P0 — Security boundary clarity
 
@@ -207,20 +222,16 @@ Items completed in v0.2.0 / v0.3.0 (struck through). Items 6 and the new macOS-K
 
 3. ~~**Stop the background log follower explicitly.**~~ Shipped in v0.2.0.
 
-4. ~~**Add a real-Claude smoke test.**~~ Shipped in v0.3.0. (Known limitation: on macOS, falls back to `ANTHROPIC_API_KEY` because the `.credentials.json` file is stale relative to the host Keychain.)
+4. ~~**Add a real-Claude smoke test.**~~ Shipped in v0.3.0.
 
-5. **macOS Keychain-resident Claude credentials don't reach the sandbox.**
-   - Current state: the smoke test and real production runs on macOS need `ANTHROPIC_API_KEY` in env because the host's `~/.claude/.credentials.json` is a stale OAuth snapshot — the live state lives in the Keychain.
-   - Risk: macOS users get confusing 401s if they don't know to set the env var.
-   - Follow up: at session start, ask the host `claude` CLI to print a fresh token (or document the env-var path prominently in README).
+5. ~~**macOS Keychain-resident Claude credentials don't reach the sandbox.**~~ Resolved in v0.4.0 by switching to `CLAUDE_CODE_OAUTH_TOKEN` env (`claude setup-token` produces one from the subscription).
 
 ### P2 — Cleanup and ergonomics
 
-5. ~~**Remove dead `build_dir_db` from `ComposeConfig`.**~~ Shipped in v0.2.0.
+6. ~~**Remove dead `build_dir_db` from `ComposeConfig`.**~~ Shipped in v0.2.0.
 
-6. **Make integration fixtures less coupled to one `tmp_path`.**
-   - Current state: the fixture repo, tiny dump, and patched image tree share the same test temp root.
-   - Risk: low; no observed failures, but filesystem cleanup or path collision bugs would be harder to diagnose.
-   - Follow up: split fixture roots or use named subdirectories with stricter cleanup assertions.
+7. ~~**Make integration fixtures less coupled to one `tmp_path`.**~~ Shipped in v0.3.0 as Task 1.
 
-7. ~~**Improve CLI operator output.**~~ Shipped in v0.2.0 — `sandbox list`, human-readable timestamps, error wrappers.
+8. ~~**Improve CLI operator output.**~~ Shipped in v0.2.0 — `sandbox list`, human-readable timestamps, error wrappers.
+
+All backlog items resolved.
