@@ -29,10 +29,12 @@ def fixture_repo(tmp_path):
 @pytest.fixture
 def tiny_dump(tmp_path):
     """Produce a valid pg_dump custom-format file using a one-shot postgres container."""
-    out = tmp_path / "tiny.dump"
+    dump_dir = tmp_path / "dump"
+    dump_dir.mkdir()
+    out = dump_dir / "tiny.dump"
     subprocess.run([
         "docker", "run", "--rm",
-        "-v", f"{tmp_path}:/out",
+        "-v", f"{dump_dir}:/out",
         "postgres:16",
         "su", "-c",
         "initdb -D /tmp/d -U postgres >/dev/null && "
