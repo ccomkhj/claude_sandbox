@@ -22,6 +22,8 @@ class ComposeConfig:
     build_dir_agent: str
     db_name: str
     proxy_image: str = "sandbox-proxy:latest"
+    auth_env_name: str = "CLAUDE_CODE_OAUTH_TOKEN"
+    auth_env_value: str = ""
 
 
 def render(cfg: ComposeConfig) -> str:

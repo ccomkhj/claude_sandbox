@@ -14,6 +14,8 @@ def cfg(**overrides):
         agent_image_name="sandbox-agent",
         build_dir_agent="./build/agent",
         db_name="appdb",
+        auth_env_name="CLAUDE_CODE_OAUTH_TOKEN",   # NEW
+        auth_env_value="dummy-token",              # NEW
     )
     return dataclasses.replace(base, **overrides)
 
@@ -148,3 +150,33 @@ def test_proxy_egress_net_is_a_bridge_with_internet():
     parsed = yaml.safe_load(render(cfg()))
     assert parsed["networks"]["proxy_egress_net"]["driver"] == "bridge"
     assert parsed["networks"]["proxy_egress_net"].get("internal", False) is False
+
+
+def test_agent_renders_oauth_token_env_when_configured():
+    parsed = yaml.safe_load(render(cfg(
+        auth_env_name="CLAUDE_CODE_OAUTH_TOKEN",
+        auth_env_value="oauth-fake-abc",
+    )))
+    env = parsed["services"]["agent"]["environment"]
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-fake-abc"
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_agent_renders_api_key_env_when_configured():
+    parsed = yaml.safe_load(render(cfg(
+        auth_env_name="ANTHROPIC_API_KEY",
+        auth_env_value="sk-ant-api-99",
+    )))
+    env = parsed["services"]["agent"]["environment"]
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-api-99"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+def test_agent_auth_env_handles_special_chars():
+    """tojson filter must escape quotes/newlines safely."""
+    weird = 'tok"en\nwith"quotes'
+    parsed = yaml.safe_load(render(cfg(
+        auth_env_name="CLAUDE_CODE_OAUTH_TOKEN",
+        auth_env_value=weird,
+    )))
+    assert parsed["services"]["agent"]["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == weird

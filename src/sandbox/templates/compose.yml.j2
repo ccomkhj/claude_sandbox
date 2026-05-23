@@ -31,6 +31,7 @@ services:
       db:
         condition: service_healthy
     environment:
+      {{ auth_env_name }}: {{ auth_env_value | tojson }}
       GOAL: {{ goal | tojson }}
       BRANCH: sandbox/{{ session_id }}
       DATABASE_URL: postgresql://postgres@db:5432/{{ db_name }}
