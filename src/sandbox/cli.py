@@ -76,9 +76,7 @@ def _db_image_tag(sid: str) -> str:
 def _cleanup_sensitive_build_inputs(sdir: Path) -> None:
     for rel in (
         "build/agent/repo.bundle",
-        "build/agent/.credentials.json",
         "input/repo.bundle",
-        "input/.credentials.json",
     ):
         try:
             (sdir / rel).unlink(missing_ok=True)
@@ -259,18 +257,15 @@ def _images_root() -> Path:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    creds_src = Path.home() / ".claude" / ".credentials.json"
-    if not creds_src.is_file():
-        print(
-            "error: ~/.claude/.credentials.json not found. "
-            "Run `claude login` on the host before starting a sandbox.",
-            file=sys.stderr,
-        )
+    try:
+        auth_env_name, auth_env_value = _resolve_host_auth()
+    except HostAuthMissing as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
 
     meta = session.new_session(goal=args.goal, repo=args.repo)
     try:
-        return _start_session(meta, args, creds_src)
+        return _start_session(meta, args, auth_env_name, auth_env_value)
     except Exception:
         # Mark the partial session failed so prune can reclaim it later.
         import time as _time
@@ -287,7 +282,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         raise
 
 
-def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path) -> int:
+def _start_session(
+    meta: session.Meta,
+    args: argparse.Namespace,
+    auth_env_name: str,
+    auth_env_value: str,
+) -> int:
     sdir = session.session_dir(meta.id)
     project = meta.id.lower()
     meta.agent_image = _agent_image_tag(args.agent_image, meta.id)
@@ -307,8 +307,6 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
         input_dir = sdir / "input"
         input_dir.mkdir(parents=True)
         repo.bundle_host_repo(Path(args.repo), input_dir / "repo.bundle")
-        shutil.copy(creds_src, input_dir / ".credentials.json")
-        (input_dir / ".credentials.json").chmod(0o600)
 
         # 3. Resolve allowlist and render proxy config BEFORE compose up
         allowlist_fqdns = _resolve_allowlist(
@@ -332,6 +330,8 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
             build_dir_agent="./build/agent",
             db_name=args.db_name,
             proxy_image="sandbox-proxy:latest",
+            auth_env_name=auth_env_name,
+            auth_env_value=auth_env_value,
         )
         (sdir / "compose.yml").write_text(compose.render(cfg))
 
@@ -349,14 +349,13 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
         _wait_for_db_ready(container=db_container, db_name=args.db_name)
         _import_dump_at_runtime(container=db_container, local_dump=local_dump, db_name=args.db_name)
 
-        # 10. Hand repo bundle + creds to running agent container.
+        # 10. Hand repo bundle to running agent container.
         # `docker cp` lands files owned by root:root inside the container, but the
         # agent process runs as the unprivileged `node` user (required because
         # claude --dangerously-skip-permissions refuses to run as root). Chown
         # the files after the copy so the entrypoint can read them.
         container = docker.container_name(project=project, service="agent")
         docker.cp(src=str(input_dir / "repo.bundle"), dst=f"{container}:/input/repo.bundle")
-        docker.cp(src=str(input_dir / ".credentials.json"), dst=f"{container}:/input/.credentials.json")
         # `docker cp` lands files as root:root inside the container. The real
         # agent image runs as the unprivileged `node` user (claude
         # --dangerously-skip-permissions refuses to run as root), so we need
@@ -365,7 +364,7 @@ def _start_session(meta: session.Meta, args: argparse.Namespace, creds_src: Path
         try:
             docker.exec_in_container(
                 container=container,
-                cmd=["chown", "node:node", "/input/repo.bundle", "/input/.credentials.json"],
+                cmd=["chown", "node:node", "/input/repo.bundle"],
                 user="root",
             )
         except Exception:

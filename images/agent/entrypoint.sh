@@ -5,19 +5,13 @@ set -euo pipefail
 : "${BRANCH:?BRANCH env var required}"
 
 deadline=$((SECONDS + 120))
-while [[ ! -s /input/repo.bundle || ! -s /input/.credentials.json ]]; do
+while [[ ! -s /input/repo.bundle ]]; do
   if (( SECONDS >= deadline )); then
     echo "timed out waiting for sandbox inputs" >&2
     exit 2
   fi
   sleep 1
 done
-
-# Install creds into the location claude expects, then shred original.
-mkdir -p "$HOME/.claude"
-cp /input/.credentials.json "$HOME/.claude/.credentials.json"
-chmod 600 "$HOME/.claude/.credentials.json"
-shred -u /input/.credentials.json
 
 # Clone repo bundle and check out the agent's branch.
 git clone /input/repo.bundle /work/repo

@@ -27,10 +27,7 @@ def test_start_orchestrates_and_prints_session_id(sandbox_home, tmp_path, monkey
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     # Stub the side-effect modules
     fake_dump = MagicMock(return_value=(tmp_path / "fake.dump", "etag123"))
@@ -79,18 +76,20 @@ def test_start_orchestrates_and_prints_session_id(sandbox_home, tmp_path, monkey
     fake_up.assert_called_once()
     cp_sources = [call.kwargs["src"] for call in fake_cp.call_args_list]
     assert str(sdir / "input" / "repo.bundle") in cp_sources
-    assert str(sdir / "input" / ".credentials.json") in cp_sources
+    assert not any(".credentials.json" in s for s in cp_sources)
     fake_logs.assert_called_once()
 
 
-def test_start_aborts_when_creds_missing(sandbox_home, tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HOME", str(tmp_path / "empty_home"))
+def test_start_aborts_when_no_auth_env_set(sandbox_home, monkeypatch, capsys):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     rc = cli.main([
-        "start", "--repo", str(tmp_path), "--goal", "g",
+        "start", "--repo", "/tmp", "--goal", "g",
         "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
     ])
+    err = capsys.readouterr().err
     assert rc != 0
-    assert "credentials" in capsys.readouterr().err.lower()
+    assert "claude setup-token" in err
 
 
 def test_start_marks_session_failed_when_orchestration_raises(
@@ -106,10 +105,7 @@ def test_start_marks_session_failed_when_orchestration_raises(
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     # Force dump.fetch to blow up after session is created
     monkeypatch.setattr(cli.dump, "fetch", MagicMock(side_effect=RuntimeError("s3 boom")))
@@ -140,10 +136,7 @@ def test_start_tears_down_compose_when_input_copy_fails(
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     (tmp_path / "fake.dump").write_bytes(b"x")
     monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "e")))
@@ -170,7 +163,6 @@ def test_start_tears_down_compose_when_input_copy_fails(
     remove_images.assert_called_once_with(m.agent_image)
     sdir = session.session_dir(m.id)
     assert not (sdir / "input" / "repo.bundle").exists()
-    assert not (sdir / "input" / ".credentials.json").exists()
 
 
 def test_start_passes_lowercased_project_to_docker(
@@ -186,10 +178,7 @@ def test_start_passes_lowercased_project_to_docker(
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     (tmp_path / "fake.dump").write_bytes(b"x")
     monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "e")))
@@ -516,10 +505,7 @@ def test_start_imports_dump_at_runtime_not_via_image_build(
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     (tmp_path / "fake.dump").write_bytes(b"DUMP")
     monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
@@ -750,10 +736,7 @@ def test_main_translates_no_aws_credentials_to_friendly_error(sandbox_home, tmp_
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     import botocore.exceptions
     def boom(b, k):
@@ -836,10 +819,7 @@ def test_start_renders_session_squid_config_from_allowlist_flags(
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     (tmp_path / "fake.dump").write_bytes(b"DUMP")
     monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
@@ -883,10 +863,7 @@ def test_start_installs_proxy_config_before_agent_inputs(sandbox_home, tmp_path,
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
 
-    creds = tmp_path / "creds_home" / ".claude"
-    creds.mkdir(parents=True)
-    (creds / ".credentials.json").write_text("{}")
-    monkeypatch.setenv("HOME", str(tmp_path / "creds_home"))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-token-for-test")
 
     (tmp_path / "fake.dump").write_bytes(b"DUMP")
     monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
