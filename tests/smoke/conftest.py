@@ -1,6 +1,5 @@
 import os
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -41,17 +40,18 @@ def tiny_dump(tmp_path):
 
 
 @pytest.fixture
-def smoke_creds(monkeypatch, tmp_path):
-    """Skip cleanly if neither ANTHROPIC_API_KEY nor real ~/.claude/.credentials.json exist."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        home = tmp_path / "smoke_home"
-        (home / ".claude").mkdir(parents=True)
-        (home / ".claude" / ".credentials.json").write_text(
-            '{"anthropic_api_key": "%s"}' % os.environ["ANTHROPIC_API_KEY"]
-        )
-        monkeypatch.setenv("HOME", str(home))
+def smoke_creds(monkeypatch):
+    """Skip cleanly if neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set.
+
+    These are the two auth modes v0.4+ supports. Prefer CLAUDE_CODE_OAUTH_TOKEN
+    (subscription-billed via `claude setup-token`); ANTHROPIC_API_KEY falls back
+    to pay-per-token API billing.
+    """
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         return
-    real_creds = os.path.expanduser("~/.claude/.credentials.json")
-    if not os.path.isfile(real_creds):
-        pytest.skip("no ANTHROPIC_API_KEY and no ~/.claude/.credentials.json — skipping smoke test")
-    # Else: run with real HOME (don't override it)
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return
+    pytest.skip(
+        "smoke test needs CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token` on the host) "
+        "or ANTHROPIC_API_KEY in env — neither was set"
+    )
