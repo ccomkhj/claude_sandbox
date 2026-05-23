@@ -37,11 +37,11 @@ The CLI on the host assembles each session: pulls the Postgres dump from S3, cop
 ```sh
 git clone https://github.com/ccomkhj/claude_sandbox.git
 cd claude_sandbox
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
+uv venv && source .venv/bin/activate
+uv pip install -e .
 ```
 
-Requires Docker (with `compose` v2), Python 3.11+, and AWS credentials for the dump bucket.
+Requires Docker (with `compose` v2), Python 3.11+, [uv](https://docs.astral.sh/uv/), and AWS credentials for the dump bucket.
 
 ## Use
 
@@ -66,13 +66,12 @@ sandbox prune                   # drop finished sessions >30 days old
 ## Testing
 
 ```sh
-pip install -e '.[dev]'
+uv pip install -e '.[dev]'
 pytest                          # ~90 unit tests, <1s
 pytest --run-integration        # +2 real-Docker tests, ~45s on cached layers
 pytest --run-smoke              # +1 real-Claude smoke (needs CLAUDE_CODE_OAUTH_TOKEN)
 ```
 
-## Design
+## License
 
-- Specs and plans: `docs/superpowers/specs/`, `docs/superpowers/plans/`
-- Release notes and decisions: `PROGRESS.md`
+Apache License 2.0 — see [`LICENSE`](LICENSE).

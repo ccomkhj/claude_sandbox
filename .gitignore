@@ -6,3 +6,7 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+
+# Internal docs and progress notes (kept local, not published)
+docs/superpowers/
+PROGRESS.md
