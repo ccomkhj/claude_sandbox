@@ -1,6 +1,15 @@
 name: {{ session_id | lower }}
 
 services:
+  proxy:
+    image: {{ proxy_image }}
+    networks: [agent_net, proxy_egress_net]
+    healthcheck:
+      test: ["CMD-SHELL", "squidclient -h 127.0.0.1 cache_object://localhost/info >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
   db:
     image: {{ db_image }}
     environment:
@@ -25,10 +34,16 @@ services:
       GOAL: {{ goal | tojson }}
       BRANCH: sandbox/{{ session_id }}
       DATABASE_URL: postgresql://postgres@db:5432/{{ db_name }}
+      HTTPS_PROXY: "http://proxy:3128"
+      HTTP_PROXY: "http://proxy:3128"
+      NO_PROXY: "db,localhost,127.0.0.1"
     networks: [agent_net, db_net]
 
 networks:
   agent_net:
+    driver: bridge
+    internal: true
+  proxy_egress_net:
     driver: bridge
   db_net:
     driver: bridge

@@ -21,6 +21,7 @@ class ComposeConfig:
     agent_image_name: str
     build_dir_agent: str
     db_name: str
+    proxy_image: str = "sandbox-proxy:latest"
 
 
 def render(cfg: ComposeConfig) -> str:

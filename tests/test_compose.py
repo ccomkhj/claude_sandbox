@@ -105,3 +105,45 @@ def test_squid_config_rejects_empty_allowlist():
     from sandbox.compose import render_squid_config
     with pytest.raises(ValueError, match="allowlist cannot be empty"):
         render_squid_config(allowlist_fqdns=[])
+
+
+def test_proxy_service_present():
+    parsed = yaml.safe_load(render(cfg(proxy_image="sandbox-proxy:latest")))
+    assert "proxy" in parsed["services"]
+    assert parsed["services"]["proxy"]["image"] == "sandbox-proxy:latest"
+
+
+def test_agent_net_is_internal():
+    # v0.3.0: agent has NO direct egress; only path out is via proxy on proxy_egress_net
+    parsed = yaml.safe_load(render(cfg()))
+    assert parsed["networks"]["agent_net"]["internal"] is True
+
+
+def test_proxy_on_agent_net_and_egress_net():
+    parsed = yaml.safe_load(render(cfg()))
+    proxy_nets = set(parsed["services"]["proxy"]["networks"])
+    assert "agent_net" in proxy_nets
+    assert "proxy_egress_net" in proxy_nets
+
+
+def test_agent_has_https_proxy_env():
+    parsed = yaml.safe_load(render(cfg()))
+    env = parsed["services"]["agent"]["environment"]
+    assert env["HTTPS_PROXY"] == "http://proxy:3128"
+    assert env["HTTP_PROXY"] == "http://proxy:3128"
+    # db should be in NO_PROXY so postgres connections don't go through Squid
+    assert "db" in env["NO_PROXY"]
+
+
+def test_agent_not_on_proxy_egress_net():
+    parsed = yaml.safe_load(render(cfg()))
+    agent_nets = set(parsed["services"]["agent"]["networks"])
+    assert "agent_net" in agent_nets
+    assert "db_net" in agent_nets
+    assert "proxy_egress_net" not in agent_nets
+
+
+def test_proxy_egress_net_is_a_bridge_with_internet():
+    parsed = yaml.safe_load(render(cfg()))
+    assert parsed["networks"]["proxy_egress_net"]["driver"] == "bridge"
+    assert parsed["networks"]["proxy_egress_net"].get("internal", False) is False
