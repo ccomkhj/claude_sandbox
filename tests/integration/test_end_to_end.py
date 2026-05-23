@@ -16,12 +16,11 @@ def test_end_to_end_with_stub_agent(
         pytest.skip("docker daemon not available")
 
     # Assemble a patched images/ tree that uses agent-stub in place of the real agent.
+    # v0.2.0: db/ subdir is gone — the CLI uses upstream postgres:16 and imports the dump
+    # at runtime via docker cp + pg_restore. Only agent/ is needed here.
     images_real = Path(__file__).resolve().parents[2] / "images"
     images_patched = tmp_path / "images"
-    (images_patched / "db").mkdir(parents=True)
     (images_patched / "agent").mkdir(parents=True)
-    _sh.copy(images_real / "db" / "Dockerfile", images_patched / "db" / "Dockerfile")
-    _sh.copy(images_real / "db" / "init.sh", images_patched / "db" / "init.sh")
     _sh.copy(images_real / "agent-stub" / "Dockerfile", images_patched / "agent" / "Dockerfile")
     _sh.copy(images_real / "agent-stub" / "entrypoint.sh", images_patched / "agent" / "entrypoint.sh")
     monkeypatch.setattr(cli, "_images_root", lambda: images_patched)
@@ -57,12 +56,24 @@ def test_end_to_end_with_stub_agent(
                        capture_output=True)
         pytest.fail("agent container never exited")
 
-    rc = cli.main(["finish", sid])
-    assert rc == 0
+    try:
+        rc = cli.main(["finish", sid])
+        assert rc == 0
 
-    bare = session.session_dir(sid) / "bare.git"
-    log = subprocess.run(
-        ["git", "-C", str(bare), "log", "--format=%s", f"sandbox/{sid}"],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    assert "stub: stub goal" in log
+        bare = session.session_dir(sid) / "bare.git"
+        log = subprocess.run(
+            ["git", "-C", str(bare), "log", "--format=%s", f"sandbox/{sid}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert "stub: stub goal" in log
+
+        # v0.2.0 invariant: no sandbox-db:* image was created.
+        images = subprocess.run(
+            ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        sandbox_db_lines = [line for line in images.splitlines() if line.startswith("sandbox-db:")]
+        assert sandbox_db_lines == [], f"sandbox-db image leaked into image store: {sandbox_db_lines!r}"
+    finally:
+        subprocess.run(["docker", "compose", "-p", project, "down", "-v", "--rmi", "local"],
+                       capture_output=True)

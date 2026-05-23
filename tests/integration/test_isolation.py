@@ -17,12 +17,11 @@ def test_isolation_invariants(
 
     # Use a modified agent-stub that idles 120s after its normal work so we can
     # docker exec into it.
+    # v0.2.0: db/ subdir is gone — the CLI uses upstream postgres:16 and imports the dump
+    # at runtime via docker cp + pg_restore. Only agent/ is needed here.
     images_real = Path(__file__).resolve().parents[2] / "images"
     images_patched = tmp_path / "images"
-    (images_patched / "db").mkdir(parents=True)
     (images_patched / "agent").mkdir(parents=True)
-    _sh.copy(images_real / "db" / "Dockerfile", images_patched / "db" / "Dockerfile")
-    _sh.copy(images_real / "db" / "init.sh", images_patched / "db" / "init.sh")
     _sh.copy(images_real / "agent-stub" / "Dockerfile", images_patched / "agent" / "Dockerfile")
 
     # Custom entrypoint that performs the stub work then idles. We replace the
