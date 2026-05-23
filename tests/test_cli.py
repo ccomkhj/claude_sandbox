@@ -930,3 +930,13 @@ def test_resolve_host_auth_raises_when_neither_set(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(cli.HostAuthMissing, match="claude setup-token"):
         cli._resolve_host_auth()
+
+
+def test_resolve_allowlist_with_aws_group():
+    fqdns = cli._resolve_allowlist(groups="aws", extra="")
+    assert ".amazonaws.com" in fqdns
+
+
+def test_default_group_includes_aws():
+    fqdns = cli._resolve_allowlist(groups="default", extra="")
+    assert ".amazonaws.com" in fqdns

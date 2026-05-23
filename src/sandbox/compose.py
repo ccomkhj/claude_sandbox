@@ -24,6 +24,7 @@ class ComposeConfig:
     proxy_image: str = "sandbox-proxy:latest"
     auth_env_name: str = "CLAUDE_CODE_OAUTH_TOKEN"
     auth_env_value: str = ""
+    aws_credentials: dict | None = None
 
 
 def render(cfg: ComposeConfig) -> str:

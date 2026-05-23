@@ -16,6 +16,7 @@ def cfg(**overrides):
         db_name="appdb",
         auth_env_name="CLAUDE_CODE_OAUTH_TOKEN",   # NEW
         auth_env_value="dummy-token",              # NEW
+        aws_credentials=None,
     )
     return dataclasses.replace(base, **overrides)
 
@@ -180,3 +181,41 @@ def test_agent_auth_env_handles_special_chars():
         auth_env_value=weird,
     )))
     assert parsed["services"]["agent"]["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == weird
+
+
+def test_agent_renders_aws_env_when_credentials_provided():
+    aws_creds = {
+        "access_key_id": "ASIAFAKE",
+        "secret_access_key": "secret-fake",
+        "session_token": "session-fake",
+        "region": "us-east-1",
+    }
+    parsed = yaml.safe_load(render(cfg(aws_credentials=aws_creds)))
+    env = parsed["services"]["agent"]["environment"]
+    assert env["AWS_ACCESS_KEY_ID"] == "ASIAFAKE"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "secret-fake"
+    assert env["AWS_SESSION_TOKEN"] == "session-fake"
+    assert env["AWS_REGION"] == "us-east-1"
+
+
+def test_agent_omits_aws_env_when_credentials_none():
+    parsed = yaml.safe_load(render(cfg(aws_credentials=None)))
+    env = parsed["services"]["agent"]["environment"]
+    assert "AWS_ACCESS_KEY_ID" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "AWS_SESSION_TOKEN" not in env
+    assert "AWS_REGION" not in env
+
+
+def test_agent_renders_aws_env_without_session_token_when_unset():
+    aws_creds = {
+        "access_key_id": "AKIAFAKE",
+        "secret_access_key": "secret-fake",
+        "session_token": None,  # long-lived creds path
+        "region": "eu-west-1",
+    }
+    parsed = yaml.safe_load(render(cfg(aws_credentials=aws_creds)))
+    env = parsed["services"]["agent"]["environment"]
+    assert env["AWS_ACCESS_KEY_ID"] == "AKIAFAKE"
+    assert env["AWS_REGION"] == "eu-west-1"
+    assert "AWS_SESSION_TOKEN" not in env

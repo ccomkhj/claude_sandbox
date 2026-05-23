@@ -38,6 +38,14 @@ services:
       HTTPS_PROXY: "http://proxy:3128"
       HTTP_PROXY: "http://proxy:3128"
       NO_PROXY: "db,localhost,127.0.0.1"
+{% if aws_credentials %}
+      AWS_ACCESS_KEY_ID: {{ aws_credentials.access_key_id | tojson }}
+      AWS_SECRET_ACCESS_KEY: {{ aws_credentials.secret_access_key | tojson }}
+{% if aws_credentials.session_token %}
+      AWS_SESSION_TOKEN: {{ aws_credentials.session_token | tojson }}
+{% endif %}
+      AWS_REGION: {{ aws_credentials.region | tojson }}
+{% endif %}
     networks: [agent_net, db_net]
 
 networks:

@@ -32,10 +32,14 @@ EGRESS_ALLOWLIST_GROUPS: dict[str, tuple[str, ...]] = {
         # .npmjs.org covers registry.npmjs.org and all subdomains.
         ".npmjs.org",
     ),
+    "aws": (
+        # .amazonaws.com covers s3.amazonaws.com, sts.amazonaws.com, etc.
+        ".amazonaws.com",
+    ),
 }
 EGRESS_ALLOWLIST_GROUPS["default"] = tuple(
     fqdn
-    for group in ("anthropic", "github", "python", "node")
+    for group in ("anthropic", "github", "python", "node", "aws")
     for fqdn in EGRESS_ALLOWLIST_GROUPS[group]
 )
 
