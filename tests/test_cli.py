@@ -940,3 +940,194 @@ def test_resolve_allowlist_with_aws_group():
 def test_default_group_includes_aws():
     fqdns = cli._resolve_allowlist(groups="default", extra="")
     assert ".amazonaws.com" in fqdns
+
+
+def test_aws_profile_requires_s3_buckets_or_unsafe_flag(sandbox_home, tmp_path, monkeypatch, capsys):
+    """--aws-profile without --s3-buckets and without --aws-unsafe-passthrough errors."""
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+        "--aws-profile", "my-profile",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "--s3-buckets" in err
+    assert "--aws-unsafe-passthrough" in err
+
+
+def test_aws_profile_with_buckets_mints_sts_token_and_passes_to_compose(
+    sandbox_home, tmp_path, monkeypatch, capsys
+):
+    """--aws-profile + --s3-buckets mints STS-scoped creds and renders them."""
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli.docker, "cp", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    mint_calls = []
+    fake_creds = {
+        "access_key_id": "ASIA-STS",
+        "secret_access_key": "secret-sts",
+        "session_token": "session-sts",
+        "region": "us-east-1",
+    }
+    def fake_mint(*, profile, buckets, duration_seconds=3600):
+        mint_calls.append({"profile": profile, "buckets": buckets})
+        return fake_creds
+    monkeypatch.setattr(cli, "_mint_scoped_s3_token", fake_mint)
+
+    captured_compose = []
+    real_render = cli.compose.render
+    def spy_render(cfg):
+        captured_compose.append(cfg)
+        return real_render(cfg)
+    monkeypatch.setattr(cli.compose, "render", spy_render)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+        "--aws-profile", "readonly-prod",
+        "--s3-buckets", "uploads,exports",
+    ])
+    assert rc == 0
+    assert mint_calls == [{"profile": "readonly-prod", "buckets": ["uploads", "exports"]}]
+    assert len(captured_compose) == 1
+    assert captured_compose[0].aws_credentials == fake_creds
+
+
+def test_aws_unsafe_passthrough_emits_warning_and_uses_raw_session(
+    sandbox_home, tmp_path, monkeypatch, capsys
+):
+    """--aws-unsafe-passthrough reads raw session creds, prints a warning, skips STS."""
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli.docker, "cp", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    class FakeFrozen:
+        access_key = "AKIA-RAW"
+        secret_key = "secret-raw"
+        token = None  # long-lived; no session token
+
+    class FakeSession:
+        def __init__(self, **kw): pass
+        def get_credentials(self):
+            class C:
+                def get_frozen_credentials(self):
+                    return FakeFrozen()
+            return C()
+        region_name = "eu-west-1"
+
+    import boto3
+    monkeypatch.setattr(boto3, "Session", lambda **kw: FakeSession(**kw))
+
+    captured_compose = []
+    real_render = cli.compose.render
+    def spy_render(cfg):
+        captured_compose.append(cfg)
+        return real_render(cfg)
+    monkeypatch.setattr(cli.compose, "render", spy_render)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+        "--aws-profile", "any",
+        "--aws-unsafe-passthrough",
+    ])
+    err = capsys.readouterr().err
+    assert rc == 0
+    # Warning prominently in stderr
+    assert "unsafe" in err.lower() or "raw" in err.lower()
+    # Creds got passed to compose
+    assert captured_compose[0].aws_credentials == {
+        "access_key_id": "AKIA-RAW",
+        "secret_access_key": "secret-raw",
+        "session_token": None,
+        "region": "eu-west-1",
+    }
+
+
+def test_no_aws_flags_means_no_aws_credentials_passed(
+    sandbox_home, tmp_path, monkeypatch, capsys
+):
+    """Without --aws-profile or --aws-unsafe-passthrough, aws_credentials stays None."""
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "-C", str(src), "init", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "x").write_text("x")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-m", "init"], check=True)
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+    (tmp_path / "fake.dump").write_bytes(b"DUMP")
+    monkeypatch.setattr(cli.dump, "fetch", MagicMock(return_value=(tmp_path / "fake.dump", "etag")))
+    monkeypatch.setattr(cli.docker, "build", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_up", MagicMock())
+    monkeypatch.setattr(cli.docker, "compose_logs_follow", MagicMock(return_value=MagicMock(pid=1)))
+    monkeypatch.setattr(cli.docker, "exec_in_container", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli.docker, "cp", MagicMock(return_value=MagicMock(returncode=0)))
+    monkeypatch.setattr(cli, "_wait_for_db_ready", lambda **kw: None)
+    monkeypatch.setattr(cli, "_wait_for_proxy_ready", lambda **kw: None)
+
+    captured_compose = []
+    real_render = cli.compose.render
+    def spy_render(cfg):
+        captured_compose.append(cfg)
+        return real_render(cfg)
+    monkeypatch.setattr(cli.compose, "render", spy_render)
+
+    rc = cli.main([
+        "start", "--repo", str(src), "--goal", "g",
+        "--dump-bucket", "b", "--dump-key", "k", "--db-name", "appdb",
+    ])
+    assert rc == 0
+    assert captured_compose[0].aws_credentials is None

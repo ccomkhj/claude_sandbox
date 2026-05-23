@@ -48,6 +48,10 @@ class HostAuthMissing(RuntimeError):
     """Raised when no usable Claude credentials are available in host env."""
 
 
+class _AwsFlagError(RuntimeError):
+    """Raised when AWS CLI flags are used incorrectly; cmd_start converts this to rc=2."""
+
+
 def _resolve_host_auth() -> tuple[str, str]:
     """Return (env_var_name, token_value) for the agent container.
 
@@ -220,6 +224,51 @@ def _resolve_allowlist(*, groups: str, extra: str) -> list[str]:
     return seen
 
 
+def _mint_scoped_s3_token(*, profile, buckets, duration_seconds=3600):
+    from sandbox import aws as aws_mod
+    return aws_mod.mint_scoped_s3_token(profile=profile, buckets=buckets, duration_seconds=duration_seconds)
+
+
+def _resolve_aws_credentials(args) -> dict | None:
+    """Resolve AWS credentials for the agent based on CLI flags.
+
+    Returns None if no AWS flags are set.
+    Returns an STS-scoped credentials dict by default.
+    Returns raw profile credentials if --aws-unsafe-passthrough is set (with stderr warning).
+    Exits non-zero (sys.exit(2)) if --aws-profile is set without --s3-buckets or --aws-unsafe-passthrough.
+    """
+    if not args.aws_profile and not args.aws_unsafe_passthrough:
+        return None
+
+    if args.aws_unsafe_passthrough:
+        import boto3
+        session = boto3.Session(profile_name=args.aws_profile) if args.aws_profile else boto3.Session()
+        frozen = session.get_credentials().get_frozen_credentials()
+        print(
+            "WARNING: --aws-unsafe-passthrough is set. The agent will receive your raw "
+            f"AWS credentials with whatever permissions profile {args.aws_profile or '<default>'} has. "
+            "If you only need read access, use --s3-buckets to scope via STS instead.",
+            file=sys.stderr,
+        )
+        return {
+            "access_key_id": frozen.access_key,
+            "secret_access_key": frozen.secret_key,
+            "session_token": frozen.token,
+            "region": session.region_name or "us-east-1",
+        }
+
+    # STS path: --aws-profile without --aws-unsafe-passthrough → require --s3-buckets
+    buckets = [b.strip() for b in args.s3_buckets.split(",") if b.strip()]
+    if not buckets:
+        print(
+            "error: --aws-profile requires --s3-buckets b1,b2,… to scope the STS session, "
+            "or --aws-unsafe-passthrough to skip scoping (not recommended)",
+            file=sys.stderr,
+        )
+        raise _AwsFlagError()
+    return _mint_scoped_s3_token(profile=args.aws_profile, buckets=buckets)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sandbox")
     sub = p.add_subparsers(dest="verb", required=True)
@@ -241,6 +290,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--extra-egress-allowlist",
         default="",
         help="comma-separated extra FQDNs to append to the allowlist",
+    )
+    sp.add_argument(
+        "--aws-profile",
+        default=None,
+        help="AWS profile name to draw credentials from. By default the agent is given STS-scoped read-only credentials (requires --s3-buckets).",
+    )
+    sp.add_argument(
+        "--s3-buckets",
+        default="",
+        help="Comma-separated bucket names the agent should be allowed to read. Required when --aws-profile is set, unless --aws-unsafe-passthrough is also given.",
+    )
+    sp.add_argument(
+        "--aws-unsafe-passthrough",
+        action="store_true",
+        help="Pass raw profile credentials to the agent without STS scoping. NOT RECOMMENDED — the agent receives your full profile permissions. Use only if your environment cannot call sts:GetFederationToken.",
     )
 
     for verb in ("status", "logs", "finish", "stop"):
@@ -267,9 +331,14 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    try:
+        aws_credentials = _resolve_aws_credentials(args)
+    except _AwsFlagError:
+        return 2
+
     meta = session.new_session(goal=args.goal, repo=args.repo)
     try:
-        return _start_session(meta, args, auth_env_name, auth_env_value)
+        return _start_session(meta, args, auth_env_name, auth_env_value, aws_credentials)
     except Exception:
         # Mark the partial session failed so prune can reclaim it later.
         import time as _time
@@ -291,6 +360,7 @@ def _start_session(
     args: argparse.Namespace,
     auth_env_name: str,
     auth_env_value: str,
+    aws_credentials: dict | None = None,
 ) -> int:
     sdir = session.session_dir(meta.id)
     project = meta.id.lower()
@@ -336,6 +406,7 @@ def _start_session(
             proxy_image="sandbox-proxy:latest",
             auth_env_name=auth_env_name,
             auth_env_value=auth_env_value,
+            aws_credentials=aws_credentials,
         )
         (sdir / "compose.yml").write_text(compose.render(cfg))
 
